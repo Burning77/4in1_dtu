@@ -1,0 +1,30 @@
+# 编译输出和中间文件
+*.o
+*.d
+*.a
+*.so
+*.out
+*.elf
+*.map
+*.lst
+dtu_app
+
+# 依赖文件目录
+.deps/
+
+# 设备树编译输出
+*.dtb
+rk3566-lubancat-1io.dtb.new
+
+# IDE/编辑器配置
+.vscode/
+
+# 系统/备份文件
+*~
+*.bak
+*.backup
+4in1_dtu_backup_20260306/  # 忽略整个备份目录
+
+# 其他生成文件
+com/*.o
+src/*.o

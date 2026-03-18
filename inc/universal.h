@@ -1,0 +1,62 @@
+#ifndef DATA_SAVE_H
+#define DATA_SAVE_H
+#include <stdint.h>
+#include <sys/time.h>
+#include <pthread.h>
+#include <signal.h>
+
+#define RING_BUFFER_SIZE  1024
+#define MAX_LOG_LEN 256
+#define CMD_STRING "AT\r\n"
+#define BD_CARD "$CCICR,0,00*68\r\n"
+#define SEND_INTERVAL 2 // 秒
+#define RS485_LOG_PATH "/home/cat/rs485_data.log"
+#define RS232_LOG_PATH "/home/cat/rs232_data.log"
+#define BD_LOG_PATH "/home/cat/bd_data.log"
+#define RS485_DATA 0
+#define RS232_DATA 1
+#define BD_DATA 2
+#define FIFO_SIZE (16 * 1024) // 必须是2的幂次方
+#define BD_MSG_LEN 229
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+
+typedef struct {
+    int type;           // RS485_DATA 或 RS232_DATA
+    unsigned int len;   // 数据长度
+    unsigned char data[256]; // 原始数据
+} fifo_message_t;
+
+// 前向声明
+struct kfifo;
+
+// 定义串口状态结构
+typedef struct {
+    uint8_t frame_buf[1024];       // 帧缓冲区
+    int frame_len;                 // 当前帧长度
+    struct timeval last_recv;      // 上次接收时间
+    int data_type;                 // 数据类型 (RS485_DATA 或 RS232_DATA)
+    const char* tag;               // 调试标签，如 "RS485" 或 "RS232"
+} serial_state_t;
+
+// 帧处理器上下文
+typedef struct {
+    struct kfifo* fifo;
+    pthread_mutex_t* fifo_lock;
+    pthread_cond_t* fifo_not_empty;
+} frame_processor_ctx_t;
+
+unsigned char calc_checksum(const char *s);
+int parse_log_line(const char *line, unsigned char *out_data, int max_len);
+void rf_power_on(void);
+// 初始化串口状态
+void serial_state_init(serial_state_t* state, int data_type, const char* tag);
+
+// 处理串口数据
+void process_serial_data(serial_state_t* state,
+                         unsigned char* read_buf, int read_len,
+                         int is_timeout_triggered,
+                         frame_processor_ctx_t* ctx);
+
+// 强制提交缓冲区中的残留帧
+void flush_serial_state(serial_state_t* state, frame_processor_ctx_t* ctx);
+#endif
