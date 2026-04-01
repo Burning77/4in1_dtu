@@ -11,6 +11,10 @@
 #define BT_POW_LINE 29
 #define EG_POW_CHIP "/dev/gpiochip3"
 #define EG_POW_LINE 19
+#define BT_IDLE_CHIP "/dev/gpiochip4"
+#define BT_IDLE_LINE 12
+#define BT_STATUS_CHIP "/dev/gpiochip4"
+#define BT_STATUS_LINE 10
 
 struct gpiod_chip *chip_rs485 = NULL;
 struct gpiod_line *line_rs485 = NULL;
@@ -22,6 +26,10 @@ struct gpiod_chip *chip_bt_pow = NULL;
 struct gpiod_line *line_bt_pow = NULL;
 struct gpiod_chip *chip_4g_pow = NULL;
 struct gpiod_line *line_4g_pow = NULL;
+struct gpiod_chip *chip_bt_idle = NULL;
+struct gpiod_line *line_bt_idle = NULL;
+struct gpiod_chip *chip_bt_status = NULL;
+struct gpiod_line *line_bt_status = NULL;
 int gpio_init()
 {
     chip_rs485 = gpiod_chip_open(RS485_GPIO_CHIP);
@@ -95,8 +103,29 @@ int gpio_init()
         gpiod_chip_close(chip_4g_pow);
         return -1;
     }
+
+    chip_bt_idle = gpiod_chip_open(BT_IDLE_CHIP);
+    line_bt_idle = gpiod_chip_get_line(chip_bt_idle, BT_IDLE_LINE);
+    // 请求为输出，初始值为1
+    if (gpiod_line_request_output(line_bt_idle, "bt_idle", 0) < 0)
+    {
+        perror("gpiod_line_request_output bt_idle");
+        gpiod_chip_close(chip_bt_idle); 
+        return -1;
+    }
+
+    chip_bt_status = gpiod_chip_open(BT_STATUS_CHIP);
+    line_bt_status = gpiod_chip_get_line(chip_bt_status, BT_STATUS_LINE);
+    // 请求为输出，初始值为1
+    if (gpiod_line_request_input(line_bt_status, "bt_status") < 0)
+    {
+        perror("gpiod_line_request_input bt_status");
+        gpiod_chip_close(chip_bt_status);
+        return -1;
+    }
     return 0;
 }
+
 
 void gpio_set_value(int value, struct gpiod_line *line)
 {

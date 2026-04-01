@@ -16,6 +16,7 @@
 #include "../inc/universal.h"
 #include "../inc/kfifo.h"
 #include <time.h>
+#include "llcc68.h"
 
 static off_t last_sent_offset_485 = 0;
 static off_t last_sent_offset_232 = 0;
@@ -36,9 +37,10 @@ static struct timeval rs232_last_recv = {0};
 static uint8_t bd_frame_buf[256];
 static int bd_frame_len = 0;
 static struct timeval bd_last_recv = {0};
-static int rs485_fd = -1;
-static int rs232_fd = -1;
-static int bd_fd = -1;
+extern int rs485_fd;
+extern int rs232_fd;
+extern int bd_fd;
+extern int bt_fd;
 // static int rtc_fd;
 void handle_signal(int sig)
 {
@@ -58,10 +60,11 @@ void *receive_thread(void *arg)
     int max_fd;
 
     // 初始化串口状态
-    serial_state_t rs485_state, rs232_state, bd_state;
+    serial_state_t rs485_state, rs232_state, bd_state, bt_state;
     serial_state_init(&rs485_state, RS485_DATA, "RS485");
     serial_state_init(&rs232_state, RS232_DATA, "RS232");
     serial_state_init(&bd_state, BD_DATA, "BD");
+    serial_state_init(&bt_state, BT_DATA, "BT");
 
     // 初始化帧处理器上下文
     frame_processor_ctx_t ctx = {
@@ -75,9 +78,10 @@ void *receive_thread(void *arg)
         FD_SET(rs485_fd, &read_fds);
         FD_SET(rs232_fd, &read_fds);
         FD_SET(bd_fd, &read_fds);
+        FD_SET(bt_fd, &read_fds);
         tv.tv_sec = 0;
         tv.tv_usec = 200000; // 200ms 超时
-        max_fd = MAX(MAX(rs485_fd, rs232_fd), bd_fd);
+        max_fd = MAX(MAX(MAX(rs485_fd, rs232_fd), bd_fd), bt_fd);
 
         int ret = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
 
@@ -111,6 +115,13 @@ void *receive_thread(void *arg)
             bd_read_len = data_recv(buf, sizeof(buf) - 1, BD_DEV);
         }
         process_serial_data(&bd_state, buf, bd_read_len, (ret == 0), &ctx);
+
+        int bt_read_len = 0;
+        if (FD_ISSET(bt_fd, &read_fds))
+        {
+            bt_read_len = data_recv(buf, sizeof(buf) - 1, BT_DEV);
+        }
+        process_serial_data(&bt_state, buf, bt_read_len, (ret == 0), &ctx);
     }
 
     // 退出前处理残留帧
@@ -125,6 +136,7 @@ void *receive_thread(void *arg)
 void *sensor_send_thread(void *arg)
 {
     const char *test = "Hello from rs232!\r\n";
+    const char *bt_test = "AT+VER=?\r\n";
     while (!stop_flag)
     {
         sleep(SEND_INTERVAL);
@@ -146,6 +158,11 @@ void *sensor_send_thread(void *arg)
         if (res_bd < 0)
         {
             perror("bd_send");
+        }
+        int res_bt = data_send(bt_test, strlen(bt_test), BT_DEV);
+        if (res_bt < 0)
+        {
+            perror("bt_send");
         }
     }
     return NULL;
@@ -362,6 +379,7 @@ void *bd_send_thread(void *arg)
     }
     return NULL;
 }
+
 int main(int argc, char *argv[])
 {
     // 注册信号处理
@@ -373,23 +391,9 @@ int main(int argc, char *argv[])
     {
         return 1;
     }
-    // 初始化rs485
-    rs485_fd = uart_init(RS485_DEV, RS485_BAUD);
-    if (rs485_fd < 0)
+    if (uart_init_gather())
     {
         gpio_cleanup();
-        return 1;
-    }
-    // 初始化rs232
-    rs232_fd = uart_init(RS232_DEV, RS232_BAUD);
-    if (rs232_fd < 0)
-    {
-        return 1;
-    }
-    bd_fd = uart_init(BD_DEV, BD_BAUD);
-    if (bd_fd < 0)
-    {
-        return 1;
     }
     rf_power_on();
     //  sleep(10);
@@ -409,13 +413,28 @@ int main(int argc, char *argv[])
     struct rtc_time set_time = {
         .tm_year = 2026 - 1900,
         .tm_mon = 3 - 1, // 3月
-        .tm_mday = 6,
+        .tm_mday = 31,
         .tm_hour = 12,
         .tm_min = 0,
         .tm_sec = 0,
         .tm_isdst = 0};
     rtc_set_time(&set_time);
     rtc_fd = open("/dev/rtc0", O_RDONLY);
+    loRa_Para_t my_lora_config = {
+        .rf_freq = 433000000, // 中心频率：433 MHz
+        .tx_power = 14,       // 发射功率：14 dBm
+        .lora_sf = 7,         // 扩频因子：SF7 (需与 llcc68.h 中定义匹配，如 LORA_SF7)
+        .band_width = 0x04,   // 带宽：125 kHz (对应 LORA_BW_125，值0x04)
+        .code_rate = 0x01,    // 编码率：4/5 (对应 LORA_CR_4_5，值0x01)
+        .payload_size = 64    // 预期接收负载的最大长度
+    };
+    printf("Initializing LoRa module...\n");
+    if (!Lora_init(&my_lora_config))
+    { // 将配置参数传递给驱动
+        fprintf(stderr, "LoRa module initialization failed!\n");
+        return -1;
+    }
+    printf("LoRa module initialized successfully.\n");
     // 创建线程
     pthread_t recv_tid, send_tid, rtc_tid, write_tid, bd_tid;
     if (pthread_create(&recv_tid, NULL, receive_thread, NULL) != 0)

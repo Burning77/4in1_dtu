@@ -16,6 +16,7 @@
 #define RS485_DATA 0
 #define RS232_DATA 1
 #define BD_DATA 2
+#define BT_DATA 3
 #define FIFO_SIZE (16 * 1024) // 必须是2的幂次方
 #define BD_MSG_LEN 229
 #define MAX(a,b) ((a) > (b) ? (a) : (b))

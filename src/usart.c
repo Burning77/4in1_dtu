@@ -8,11 +8,12 @@
 #include <pthread.h>
 #include "string.h"
 #include "../inc/gpio.h"
-static int rs485_fd = -1;
-static int rs232_fd = -1;
-static int bd_fd = -1;
 static pthread_mutex_t dir_mutex = PTHREAD_MUTEX_INITIALIZER;
 extern struct gpiod_line *line_rs485;
+int rs485_fd = -1;
+int rs232_fd = -1;
+int bd_fd = -1;
+int bt_fd = -1;
 int uart_init(const char *dev, speed_t baud)
 {
     int fd = open(dev, O_RDWR | O_NOCTTY);
@@ -62,6 +63,32 @@ int uart_init(const char *dev, speed_t baud)
     }
     return fd;
 }
+int uart_init_gather()
+{
+    // 初始化rs485
+    rs485_fd = uart_init(RS485_DEV, RS485_BAUD);
+    if (rs485_fd < 0)
+    {
+        return 1;
+    }
+    // 初始化rs232
+    rs232_fd = uart_init(RS232_DEV, RS232_BAUD);
+    if (rs232_fd < 0)
+    {
+        return 1;
+    }
+    bd_fd = uart_init(BD_DEV, BD_BAUD);
+    if (bd_fd < 0)
+    {
+        return 1;
+    }
+    bt_fd = uart_init(BT_DEV, BT_BAUD);
+    if (bt_fd < 0)
+    {
+        return 1;
+    }
+    return 0;
+}
 
 void rs485_set_tx_mode(void)
 {
@@ -93,10 +120,17 @@ int data_send(const void *buf, size_t len, const char *dev)
         int ret = write(rs232_fd, buf, len);
         tcdrain(rs232_fd);
         return ret;
-    }else if(!strcmp(dev, BD_DEV))
+    }
+    else if (!strcmp(dev, BD_DEV))
     {
         int ret = write(bd_fd, buf, len);
         tcdrain(bd_fd);
+        return ret;
+    }
+    else if (!strcmp(dev, BT_DEV))
+    {
+        int ret = write(bt_fd, buf, len);
+        tcdrain(bt_fd);
         return ret;
     }
     return -1;
@@ -110,9 +144,14 @@ int data_recv(void *buf, size_t len, const char *dev)
     else if (!strcmp(dev, RS232_DEV))
     {
         return read(rs232_fd, buf, len);
-    }else if(!strcmp(dev, BD_DEV))
+    }
+    else if (!strcmp(dev, BD_DEV))
     {
         return read(bd_fd, buf, len);
+    }
+    else if (!strcmp(dev, BT_DEV))
+    {
+        return read(bt_fd, buf, len);
     }
     return -1;
 }
@@ -129,6 +168,10 @@ int get_fd(const char *dev)
     else if (!strcmp(dev, BD_DEV))
     {
         return bd_fd;
+    }
+    else if (!strcmp(dev, BT_DEV))
+    {
+        return bt_fd;
     }
     return -1;
 }

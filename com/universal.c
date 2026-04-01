@@ -13,6 +13,8 @@ extern struct gpiod_line *line_bd_en;
 extern struct gpiod_line *line_bd_pow;
 extern struct gpiod_line *line_bt_pow;
 extern struct gpiod_line *line_4g_pow;
+
+
 unsigned char calc_checksum(const char *s)
 {
     unsigned char checksum = 0;

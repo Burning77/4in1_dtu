@@ -10,10 +10,12 @@
 #define RS232_BAUD    B115200
 #define BD_DEV    "/dev/ttyS7"
 #define BD_BAUD    B115200
+#define BT_DEV    "/dev/ttyS4"
+#define BT_BAUD    B115200
 // 初始化串口，设置为阻塞模式
 // 返回文件描述符，失败返回-1
 int uart_init(const char *dev, speed_t baud);
-
+int uart_init_gather();
 // 切换到发送模式（高电平）
 void rs485_set_tx_mode(void);
 
