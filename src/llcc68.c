@@ -114,7 +114,7 @@ void CheckBusy(void)
 	busy_timeout_cnt = 0;
 	while (gpiod_line_get_value(line_busy)) // 忙信号为高电平
 	{
-		delay(1);
+		usleep(1 * 1000);
 		busy_timeout_cnt++;
 
 		if (busy_timeout_cnt > 2) // TODO
@@ -161,10 +161,8 @@ void SetPacketType(uint8_t PacketType)
 	CheckBusy();
 	Opcode = SET_PACKET_TYPE; // 0x8A
 
-	SPI_NSS_LOW();
 	spi_transfer(&Opcode, NULL, 1);
 	spi_transfer(&PacketType, NULL, 1);
-	SPI_NSS_HIGH();
 }
 void SetRfFrequency(uint32_t frequency)
 {
@@ -285,15 +283,6 @@ void SetSleep(void)
 	sleepConfig = 0x00; // 0x04;	//bit2: 1:warm start; bit0:0: RTC timeout disable
 	spi_transfer(&Opcode, NULL, 1);
 	spi_transfer(&sleepConfig, NULL, 1);
-}
-void SetStandby(uint8_t StdbyConfig)
-{
-	uint8_t Opcode;
-
-	CheckBusy();
-	Opcode = SET_STANDBY; // 0x80
-	spi_transfer(&Opcode, NULL, 1);
-	spi_transfer(&StdbyConfig, NULL, 1);
 }
 void SetBufferBaseAddress(uint8_t TX_base_addr, uint8_t RX_base_addr)
 {
@@ -514,12 +503,12 @@ uint8_t WaitForIRQ_TxDone(void)
 	while (!gpiod_line_get_value(line_dio1))
 	{
 		time_out++;
-		delay(10);
+		usleep(10 * 1000);		// 10 ms
 		if (time_out > 200) // if timeout , reset the the chip
 		{
 			ClearIrqStatus(TxDone_IRQ); // Clear the IRQ TxDone flag
 			SetStandby(0);				// 0:STDBY_RC; 1:STDBY_XOSC
-			Reset_LLCC68();				// reset RF
+			reset_llcc68();				// reset RF
 			LLCC68_Config();
 			printf("WaitFor IRQ_TxDone time out\n");
 			return 0;
@@ -543,7 +532,7 @@ void WriteBuffer(uint8_t offset, uint8_t *data, uint8_t length)
 	spi_transfer(tx_buf, NULL, 2);
 	spi_transfer(data, NULL, length);
 }
-void TxPacket(uint8_t *payload, uint8_t size)
+void Lora_send(uint8_t *payload, uint8_t size)
 {
 	SetStandby(0);				// 0:STDBY_RC; 1:STDBY_Xosc
 	SetBufferBaseAddress(0, 0); //(TX_base_addr,RX_base_addr)
@@ -568,7 +557,7 @@ void TxPacket(uint8_t *payload, uint8_t size)
 	}
 }
 
-void RxPacket(uint8_t *payload, uint8_t size)
+void Lora_receive(uint8_t *payload, uint8_t size)
 {
 	rxbuf_pt = payload;
 	rxcnt_pt = &size;

@@ -54,6 +54,6 @@ bool Lora_init();
 
 // 底层 SPI 传输
 void spi_transfer(uint8_t *tx_buf, uint8_t *rx_buf, uint32_t len);
-void TxPacket(uint8_t *payload, uint8_t size);
-void RxPacket(uint8_t *payload, uint8_t size);
+void Lora_send(uint8_t *payload, uint8_t size);
+void Lora_receive(uint8_t *payload, uint8_t size);
 #endif // LLCC68_PORT_H
