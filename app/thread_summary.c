@@ -1,7 +1,4 @@
 #include "../app/thread_summary.h"
-static off_t last_sent_offset_485 = 0;
-static off_t last_sent_offset_232 = 0;
-
 extern struct kfifo data_fifo;
 
 static pthread_mutex_t fifo_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -22,6 +19,7 @@ extern int rs485_fd;
 extern int rs232_fd;
 extern int bd_fd;
 extern int bt_fd;
+extern int eg_fd;
 void handle_signal(int sig)
 {
     stop_flag = 1;
@@ -40,11 +38,12 @@ void *receive_thread(void *arg)
     int max_fd;
 
     // 初始化串口状态
-    serial_state_t rs485_state, rs232_state, bd_state, bt_state;
+    serial_state_t rs485_state, rs232_state, bd_state, bt_state, eg_state;
     serial_state_init(&rs485_state, RS485_DATA, "RS485");
     serial_state_init(&rs232_state, RS232_DATA, "RS232");
     serial_state_init(&bd_state, BD_DATA, "BD");
     serial_state_init(&bt_state, BT_DATA, "BT");
+    serial_state_init(&eg_state, EG_DATA, "EG");
 
     // 初始化帧处理器上下文
     frame_processor_ctx_t ctx = {
@@ -102,6 +101,13 @@ void *receive_thread(void *arg)
             bt_read_len = data_recv(buf, sizeof(buf) - 1, BT_DEV);
         }
         process_serial_data(&bt_state, buf, bt_read_len, (ret == 0), &ctx);
+
+        int eg_read_len = 0;
+        if (FD_ISSET(eg_fd, &read_fds))
+        {
+            eg_read_len = data_recv(buf, sizeof(buf) - 1, EG_DEV);
+        }
+        process_serial_data(&eg_state, buf, eg_read_len, (ret == 0), &ctx);
     }
 
     // 退出前处理残留帧
@@ -113,10 +119,11 @@ void *receive_thread(void *arg)
 }
 
 // 发送线程
-void *sensor_send_thread(void *arg)
+void *serial_send_thread(void *arg)
 {
     const char *test = "Hello from rs232!\r\n";
     const char *bt_test = "AT+VER=?\r\n";
+    const char *eg_cmd = "ATI\r\n";
     while (!stop_flag)
     {
         sleep(SEND_INTERVAL);
@@ -127,6 +134,8 @@ void *sensor_send_thread(void *arg)
         int resualt = data_send(test, strlen(test), RS232_DEV);
         int ret = data_send(CMD_STRING, strlen(CMD_STRING), RS485_DEV);
         int res_bd = data_send(BD_CARD, strlen(BD_CARD), BD_DEV);
+        int ret_eg = data_send(eg_cmd, strlen(eg_cmd), EG_DEV);
+        int res_bt = data_send(bt_test, strlen(bt_test), BT_DEV);
         if (resualt < 0)
         {
             perror("rs232_send");
@@ -139,10 +148,13 @@ void *sensor_send_thread(void *arg)
         {
             perror("bd_send");
         }
-        int res_bt = data_send(bt_test, strlen(bt_test), BT_DEV);
         if (res_bt < 0)
         {
             perror("bt_send");
+        }
+        if (ret_eg < 0)
+        {
+            perror("eg_send");
         }
     }
     return NULL;
@@ -244,151 +256,92 @@ void *write_file_thread(void *arg)
 }
 void *bd_send_thread(void *arg)
 {
-    char line[512];
     char hex_buf[BD_MSG_LEN + 64];
     char msg[512];
     const char *paths[] = {RS485_LOG_PATH, RS232_LOG_PATH};
-    off_t *offsets[] = {&last_sent_offset_485, &last_sent_offset_232};
-    int i, j;
+    off_t *offsets[2];
+    int hex_len, entry_count;
+    load_offsets(OFFSET_FILE_BD, offsets, 2);
 
     // 等待日志文件被创建（最多等待30秒）
     while (!stop_flag)
     {
-        hex_buf[0] = '\0';
-        int hex_len = 0;
-        int entry_count = 0;
-        int has_valid_data = 0; // 新增：标记本次循环是否有有效数据
-
-        // 首先检查两个文件是否存在
-        int files_exist = 0;
-        for (i = 0; i < 2; i++)
+        if (pack_data_from_files(paths, offsets, 2, BD_MSG_LEN,
+                                 hex_buf, &hex_len, &entry_count) == 0)
         {
-            if (access(paths[i], F_OK) == 0)
+
+            // 构造并发送报文
+            if (entry_count > 0)
             {
-                files_exist = 1;
-                break;
+                snprintf(msg, sizeof(msg), "$CCTCQ,4314513,2,1,2,,%s*", hex_buf);
+                unsigned char cs = calc_checksum(msg);
+                size_t len = strlen(msg);
+                snprintf(msg + len, sizeof(msg) - len, "%02X\r\n", cs);
+                data_send((unsigned char *)msg, strlen(msg), BD_DEV);
+                printf("[SEND BDTX] %s", msg);
+                save_offsets(OFFSET_FILE_BD, offsets, 2);
             }
-        }
-
-        // 如果两个文件都不存在，直接等待，不发送任何报文
-        if (!files_exist)
-        {
-            sleep(5);
-            continue; // 跳过本次循环，进入下一次循环
-        }
-
-        // 依次处理两个文件
-        for (i = 0; i < 2; i++)
-        {
-            FILE *fp = fopen(paths[i], "r");
-            if (!fp)
+            else
             {
-                // 文件可能在上一次检查后被删除，跳过
-                continue;
+                // 文件存在但没有有效数据，不发送任何报文
+                printf("[INFO] No valid data in log files, skipping BD transmission.\n");
             }
-
-            // 定位到上次发送位置
-            fseeko(fp, *offsets[i], SEEK_SET);
-
-            while (fgets(line, sizeof(line), fp))
-            {
-                unsigned char raw[256];
-                int raw_len = parse_log_line(line, raw, sizeof(raw));
-                if (raw_len < 2)
-                    continue; // 跳过无效行
-
-                int need_hex = raw_len * 2; // 需要的十六进制字符数
-                int total_need = hex_len + (entry_count > 0 ? 1 : 0) + need_hex;
-
-                if (total_need > BD_MSG_LEN)
-                {
-                    // 空间不足，回退一行，留待下次处理
-                    fseeko(fp, -(off_t)strlen(line), SEEK_CUR);
-                    break;
-                }
-
-                // 有有效数据，设置标志
-                has_valid_data = 1;
-
-                // 添加逗号分隔（除了第一个条目）
-                if (entry_count > 0)
-                {
-                    strcat(hex_buf, ",");
-                    hex_len++;
-                }
-
-                // 将原始数据转换为大写十六进制追加到 hex_buf
-                char hex_part[512];
-                char *p = hex_part;
-                for (j = 0; j < raw_len; j++)
-                {
-                    p += sprintf(p, "%02X", raw[j]);
-                }
-                strcat(hex_buf, hex_part);
-                hex_len += need_hex;
-                entry_count++;
-
-                // 更新偏移量
-                *offsets[i] = ftello(fp);
-            }
-
-            fclose(fp);
-        }
-
-        // 构造并发送报文
-        if (has_valid_data && entry_count > 0)
-        {
-            snprintf(msg, sizeof(msg), "$CCTCQ,4314513,2,1,2,,%s*", hex_buf);
-            unsigned char cs = calc_checksum(msg);
-            size_t len = strlen(msg);
-            snprintf(msg + len, sizeof(msg) - len, "%02X\r\n", cs);
-            data_send((unsigned char *)msg, strlen(msg), BD_DEV);
-            printf("[SEND BDTX] %s", msg);
         }
         else
         {
-            // 文件存在但没有有效数据，不发送任何报文
-            printf("[INFO] No valid data in log files, skipping BD transmission.\n");
+            printf("[ERROR] pack_data_from_files failed\n");
         }
-
         // 等待60秒
-        for (i = 0; i < 60 && !stop_flag; i++)
+        for (int i = 0; i < 60 && !stop_flag; i++)
         {
             sleep(1);
         }
     }
+    save_offsets(OFFSET_FILE_BD, offsets, 2);
     return NULL;
 }
 void *lora_transform_thread(void *arg)
 {
+    const char *paths[] = {RS485_LOG_PATH}; // 只从 RS485 日志发送
+    off_t offsets[] = {0};
+    char hex_buf[LORA_MAX_HEX_LEN + 64]; // 需定义 LORA_MAX_HEX_LEN
+    int hex_len, entry_count;
     unsigned char buf[256];
     while (!stop_flag)
     {
-        sleep(1);
-        if (stop_flag)
-            break;
-
-        // 从数据队列中获取数据
-        pthread_mutex_lock(&fifo_lock);
-        while (kfifo_len(&data_fifo) < sizeof(fifo_message_t) && !stop_flag)
+        if (pack_data_from_files(paths, offsets, 1, LORA_MAX_HEX_LEN,
+                                 hex_buf, &hex_len, &entry_count) == 0)
         {
-            pthread_cond_wait(&fifo_not_empty, &fifo_lock);
+            if (entry_count > 0)
+            {
+                // 构造 LoRa 负载（可根据实际协议调整）
+                uint8_t payload[256];
+                int payload_len = 0;
+                for (int i = 0; i < hex_len && payload_len < sizeof(payload); i += 2)
+                {
+                    unsigned int byte;
+                    sscanf(hex_buf + i, "%2x", &byte);
+                    payload[payload_len++] = (uint8_t)byte;
+                }
+                Lora_send(payload, payload_len);
+                printf("[SEND LORA] Sent %d bytes from RS485 log.\n", payload_len);
+                save_offsets(OFFSET_FILE_LORA, offsets, 1);
+            }
+            else
+            {
+                printf("[INFO] No valid data in RS485 log for LoRa, skipping transmission.\n");
+            }
         }
-        if (stop_flag)
+        else
         {
-            pthread_mutex_unlock(&fifo_lock);
-            break;
+            printf("[ERROR] pack_data_from_files failed for LoRa\n");
         }
-        fifo_message_t msg;
-        unsigned int read_len = kfifo_get(&data_fifo, (unsigned char *)&msg, sizeof(msg));
-        pthread_mutex_unlock(&fifo_lock);
-
-        if (read_len != sizeof(msg))
-            continue; // 数据不完整，跳过
-
-        // 将消息转换为 LoRa 格式并发送
-        // 这里可以根据实际需求进行格式转换，目前示例直接发送原始数据
-        Lora_send(msg.data, msg.len);
+        // 等待30秒
+        for (int i = 0; i < 30 && !stop_flag; i++)
+        {
+            sleep(1);
+        }
     }
+    save_offsets(OFFSET_FILE_LORA, offsets, 1);
     return NULL;
 }
