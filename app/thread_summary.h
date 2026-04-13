@@ -20,9 +20,9 @@
 #include <time.h>
 #include "llcc68.h"
 
-#define OFFSET_FILE_BD   "/home/cat/send_offset_bd.dat"
+#define OFFSET_FILE_MAIN   "/home/cat/send_offset.dat"
 #define OFFSET_FILE_LORA "/home/cat/send_offset_lora.dat"
-#define OFFSET_FILE_4G   "/home/cat/send_offset_4g.dat"
+
 #define LORA_MAX_HEX_LEN 256
 
 void handle_signal(int sig);
@@ -30,6 +30,8 @@ void *receive_thread(void *arg);
 void *serial_send_thread(void *arg);
 void *read_rtc_thread(void *arg);
 void *write_file_thread(void *arg);
-void *bd_send_thread(void *arg);
+void *main_send_thread(void *arg);
 void *lora_transform_thread(void *arg);
+void *eg_monitor_thread(void *arg);
+void *watchdog_feed_thread(void *arg);
 #endif

@@ -1,4 +1,9 @@
 #include "../app/thread_summary.h"
+#include "../inc/watch_dog.h"
+#include <stdatomic.h>
+#define THREAD_COUNT 8
+typedef void *(*thread_func_t)(void *);
+atomic_int stop_flag = 0;
 struct kfifo data_fifo;
 static unsigned char fifo_buffer[FIFO_SIZE];
 volatile sig_atomic_t stop_flag = 0;
@@ -7,6 +12,7 @@ extern int rs485_fd;
 extern int rs232_fd;
 extern int bd_fd;
 extern int bt_fd;
+extern int eg_fd;
 int main(int argc, char *argv[])
 {
     // 注册信号处理
@@ -62,79 +68,48 @@ int main(int argc, char *argv[])
         return -1;
     }
     printf("LoRa module initialized successfully.\n");
+    init_watchdog();
     // 创建线程
-    pthread_t recv_tid, send_tid, rtc_tid, write_tid, bd_tid,lora_tid;
-    if (pthread_create(&recv_tid, NULL, receive_thread, NULL) != 0)
+    thread_func_t thread_funcs[THREAD_COUNT] = {
+        receive_thread,
+        serial_send_thread,
+        read_rtc_thread,
+        write_file_thread,
+        main_send_thread,
+        lora_transform_thread,
+        eg_monitor_thread,
+        watchdog_feed_thread};
+    pthread_t tids[THREAD_COUNT];
+    int created_count = 0;
+    int ret = 1; // 默认失败
+    for (int i = 0; i < THREAD_COUNT; i++)
     {
-        perror("pthread_create recv");
-        uart_close(rs485_fd);
-        uart_close(rs232_fd);
-        gpio_cleanup();
-        return 1;
+        if (pthread_create(&tids[i], NULL, thread_funcs[i], NULL) != 0)
+        {
+            perror("pthread_create failed");
+            atomic_store(&stop_flag, 1);
+            goto cleanup;
+        }
+        created_count++;
     }
-    if (pthread_create(&send_tid, NULL, sensor_send_thread, NULL) != 0)
+    for (int i = 0; i < THREAD_COUNT; i++)
     {
-        perror("pthread_create send");
-        stop_flag = 1;
-        pthread_join(recv_tid, NULL);
-        uart_close(rs485_fd);
-        uart_close(rs232_fd);
-        gpio_cleanup();
-        return 1;
+        pthread_join(tids[i], NULL);
     }
-    if (pthread_create(&rtc_tid, NULL, read_rtc_thread, NULL) != 0)
-    {
-        perror("pthread_create rtc");
-        stop_flag = 1;
-        pthread_join(recv_tid, NULL);
-        pthread_join(send_tid, NULL);
-        return 1;
-    }
-    if (pthread_create(&write_tid, NULL, write_file_thread, NULL) != 0)
-    {
-        perror("pthread_create write");
-        stop_flag = 1;
-        pthread_join(recv_tid, NULL);
-        pthread_join(send_tid, NULL);
-        pthread_join(rtc_tid, NULL);
-        return 1;
-    }
-    if (pthread_create(&bd_tid, NULL, bd_send_thread, NULL) != 0)
-    {
-        perror("pthread_create bd_thread");
-        stop_flag = 1;
-        pthread_join(recv_tid, NULL);
-        pthread_join(send_tid, NULL);
-        pthread_join(rtc_tid, NULL);
-        pthread_join(write_tid, NULL);
-        return 1;
-    }
-    if(pthread_create(&lora_tid, NULL, lora_transform_thread, NULL) != 0)
-    {
-        perror("pthread_create lora_thread");
-        stop_flag = 1;
-        pthread_join(recv_tid, NULL);
-        pthread_join(send_tid, NULL);
-        pthread_join(rtc_tid, NULL);
-        pthread_join(write_tid, NULL);
-        pthread_join(bd_tid, NULL);
-        return 1;
-    }
-    // 等待线程结束
-    pthread_join(recv_tid, NULL);
-    pthread_join(send_tid, NULL);
-    pthread_join(rtc_tid, NULL);
-    pthread_join(write_tid, NULL);
-    pthread_join(bd_tid, NULL);
-    pthread_join(lora_tid, NULL);
+    ret = 0;
 
-    // 清理资源
+cleanup:
+    for (int i = 0; i < created_count; i++)
+    {
+        pthread_join(tids[i], NULL);
+    }
     uart_close(rs232_fd);
     uart_close(rs485_fd);
     uart_close(bd_fd);
+    uart_close(eg_fd);
     gpio_cleanup();
     close(rtc_fd);
+    close(watchdog_fd);
 
-    printf("Program terminated.\n");
-    return 0;
+    return ret;
 }
