@@ -21,6 +21,7 @@
 #define EG_DATA 4
 #define FIFO_SIZE (16 * 1024) // 必须是2的幂次方
 #define BD_MSG_LEN 229
+#define EG_MSG_LEN 229
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 typedef struct
@@ -50,10 +51,11 @@ typedef struct
     pthread_mutex_t *fifo_lock;
     pthread_cond_t *fifo_not_empty;
 } frame_processor_ctx_t;
-
+int hex_to_bytes(const char *hex_str, unsigned char *out_bytes, int max_len);
 unsigned char calc_checksum(const char *s);
 int parse_log_line(const char *line, unsigned char *out_data, int max_len);
 void rf_power_on(void);
+void rf_power_off(void);
 // 初始化串口状态
 void serial_state_init(serial_state_t *state, int data_type, const char *tag);
 

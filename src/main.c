@@ -6,15 +6,40 @@ typedef void *(*thread_func_t)(void *);
 atomic_int stop_flag = 0;
 struct kfifo data_fifo;
 static unsigned char fifo_buffer[FIFO_SIZE];
-volatile sig_atomic_t stop_flag = 0;
+// volatile sig_atomic_t stop_flag = 0;
 int rtc_fd;
 extern int rs485_fd;
 extern int rs232_fd;
 extern int bd_fd;
 extern int bt_fd;
 extern int eg_fd;
+extern int watchdog_fd;
+// int check_hardware_flow_control(int fd)
+// {
+//     struct termios options;
+//     if (tcgetattr(fd, &options) != 0)
+//     {
+//         perror("tcgetattr");
+//         return -1;
+//     }
+
+//     if (options.c_cflag & CRTSCTS)
+//     {
+//         printf("Hardware flow control (CRTSCTS) is ENABLED.\n");
+//         return 1;
+//     }
+//     else
+//     {
+//         printf("Hardware flow control (CRTSCTS) is DISABLED.\n");
+//         return 0;
+//     }
+// }
 int main(int argc, char *argv[])
 {
+    // 关闭 stdout/stderr 缓冲，printf/perror 实时写入 journal
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     // 注册信号处理
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
@@ -24,13 +49,25 @@ int main(int argc, char *argv[])
     {
         return 1;
     }
-    if (uart_init_gather())
-    {
-        gpio_cleanup();
-    }
     rf_power_on();
-    //  sleep(10);
 
+    // 等待 4G 模块 USB 枚举完成（EG800K 上电后需要较长时间）
+    printf("Waiting for 4G module USB enumeration...\n");
+    int uart_retry = 0;
+    const int max_uart_retry = 10;
+    while (uart_init_gather() != 0)
+    {
+        uart_retry++;
+        if (uart_retry >= max_uart_retry)
+        {
+            fprintf(stderr, "UART init failed after %d retries, exiting\n", max_uart_retry);
+            gpio_cleanup();
+            return 1;
+        }
+        printf("UART init failed, retry %d/%d in 2 seconds...\n", uart_retry, max_uart_retry);
+        sleep(2);
+    }
+    printf("All UARTs initialized successfully.\n");
     // // 发送读卡号指令
     // char cmd[] = "$CCICR,0,00 * 68\r\n";
     // write(bd_fd, cmd, strlen(cmd));
@@ -43,6 +80,18 @@ int main(int argc, char *argv[])
     // for (int i = 0; i < n; i++) {
     //     printf("%c", buf[i]);
     // }
+    // printf("flow check\n");
+    // check_hardware_flow_control(eg_fd);
+    // printf("check over\r\n");
+    // char cmd[] = "AT\r\n";
+    // printf("write cmd to eg\r\n");
+    // write(eg_fd, cmd, strlen(cmd));
+    // printf("write cmd to eg over\r\n");
+    // sleep(2);
+    // char buf[256];
+    // printf("read data from eg\r\n");
+    // int n = read(eg_fd, buf, sizeof(buf));
+    // printf("Received %s bytes\n", buf);
     struct rtc_time set_time = {
         .tm_year = 2026 - 1900,
         .tm_mon = 3 - 1, // 3月
@@ -68,7 +117,7 @@ int main(int argc, char *argv[])
         return -1;
     }
     printf("LoRa module initialized successfully.\n");
-    init_watchdog();
+    // init_watchdog();
     // 创建线程
     thread_func_t thread_funcs[THREAD_COUNT] = {
         receive_thread,
@@ -99,17 +148,21 @@ int main(int argc, char *argv[])
     ret = 0;
 
 cleanup:
-    for (int i = 0; i < created_count; i++)
+    // 如果是异常退出，等待已创建的线程
+    if (ret != 0)
     {
-        pthread_join(tids[i], NULL);
+        for (int i = 0; i < created_count; i++)
+        {
+            pthread_join(tids[i], NULL);
+        }
     }
+    rf_power_off();
     uart_close(rs232_fd);
     uart_close(rs485_fd);
     uart_close(bd_fd);
     uart_close(eg_fd);
     gpio_cleanup();
     close(rtc_fd);
-    close(watchdog_fd);
-
+    cleanup_watchdog();
     return ret;
 }

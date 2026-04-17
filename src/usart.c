@@ -14,6 +14,7 @@ int rs485_fd = -1;
 int rs232_fd = -1;
 int bd_fd = -1;
 int bt_fd = -1;
+int eg_fd = -1;
 int uart_init(const char *dev, speed_t baud)
 {
     int fd = open(dev, O_RDWR | O_NOCTTY);
@@ -31,11 +32,17 @@ int uart_init(const char *dev, speed_t baud)
 
     options.c_cflag |= (CLOCAL | CREAD);
     options.c_cflag &= ~CSIZE;
-    options.c_cflag |= CS8;      // 8位数据
-    options.c_cflag &= ~PARENB;  // 无校验
-    options.c_cflag &= ~CSTOPB;  // 1停止位
-    options.c_cflag &= ~CRTSCTS; // 无硬件流控
-
+    options.c_cflag |= CS8;     // 8位数据
+    options.c_cflag &= ~PARENB; // 无校验
+    options.c_cflag &= ~CSTOPB; // 1停止位
+    // if (strncmp(dev, EG_DEV, strlen(EG_DEV)) == 0)
+    // {
+        // options.c_cflag |= CRTSCTS; // EG模块使用硬件流控
+    // }
+    // else
+    // {
+        options.c_cflag &= ~CRTSCTS; // 无硬件流控
+    // }
     options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG); // 原始模式
     options.c_iflag &= ~(IXON | IXOFF | IXANY);         // 无软件流控
     options.c_iflag &= ~(INLCR | ICRNL | IGNCR);
@@ -87,6 +94,9 @@ int uart_init_gather()
     {
         return 1;
     }
+    eg_fd = uart_init(EG_DEV, EG_BAUD);
+    if (eg_fd < 0)
+        return 1;
     return 0;
 }
 
@@ -133,6 +143,12 @@ int data_send(const void *buf, size_t len, const char *dev)
         tcdrain(bt_fd);
         return ret;
     }
+    else if (!strcmp(dev, EG_DEV))
+    {
+        int ret = write(eg_fd, buf, len);
+        tcdrain(eg_fd);
+        return ret;
+    }
     return -1;
 }
 int data_recv(void *buf, size_t len, const char *dev)
@@ -153,6 +169,10 @@ int data_recv(void *buf, size_t len, const char *dev)
     {
         return read(bt_fd, buf, len);
     }
+    else if (!strcmp(dev, EG_DEV))
+    {
+        return read(eg_fd, buf, len);
+    }
     return -1;
 }
 int get_fd(const char *dev)
@@ -172,6 +192,10 @@ int get_fd(const char *dev)
     else if (!strcmp(dev, BT_DEV))
     {
         return bt_fd;
+    }
+    else if (!strcmp(dev, EG_DEV))
+    {
+        return eg_fd;
     }
     return -1;
 }

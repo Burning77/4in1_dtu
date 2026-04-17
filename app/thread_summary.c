@@ -28,6 +28,7 @@ extern int rs232_fd;
 extern int bd_fd;
 extern int bt_fd;
 extern int eg_fd;
+extern int watchdog_fd;
 void handle_signal(int sig)
 {
     stop_flag = 1;
@@ -204,7 +205,7 @@ void *read_rtc_thread(void *arg)
 void *write_file_thread(void *arg)
 {
     fifo_message_t msg;
-    FILE *fp_485 = NULL, *fp_232 = NULL;
+    FILE *fp_485 = NULL, *fp_232 = NULL, *fp_bd = NULL;
     char log_line[1024];
 
     while (!stop_flag)
@@ -236,9 +237,26 @@ void *write_file_thread(void *arg)
         if (read_len != sizeof(msg))
             continue; // 数据不完整，跳过
 
-        // 选择文件
-        FILE **fp = (msg.type == RS485_DATA) ? &fp_485 : &fp_232;
-        const char *path = (msg.type == RS485_DATA) ? RS485_LOG_PATH : RS232_LOG_PATH;
+        // 选择文件 - 根据数据类型选择对应的日志文件
+        FILE **fp = NULL;
+        const char *path = NULL;
+        switch (msg.type) {
+            case RS485_DATA:
+                fp = &fp_485;
+                path = RS485_LOG_PATH;
+                break;
+            case RS232_DATA:
+                fp = &fp_232;
+                path = RS232_LOG_PATH;
+                break;
+            case BD_DATA:
+                fp = &fp_bd;
+                path = BD_LOG_PATH;
+                break;
+            default:
+                printf("[WARN] Unknown data type: %d, skipping\n", msg.type);
+                continue;  // 跳过未知类型
+        }
 
         if (*fp == NULL)
         {
@@ -272,6 +290,8 @@ void *write_file_thread(void *arg)
         fclose(fp_485);
     if (fp_232)
         fclose(fp_232);
+    if (fp_bd)
+        fclose(fp_bd);
     return NULL;
 }
 // void *bd_send_thread(void *arg)

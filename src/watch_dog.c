@@ -5,7 +5,7 @@
 #include <sys/ioctl.h>
 #include <linux/watchdog.h>
 #include "../inc/watch_dog.h"
-
+int watchdog_fd = -1;
 int init_watchdog(void)
 {
     watchdog_fd = open("/dev/watchdog", O_WRONLY);
@@ -20,4 +20,15 @@ int init_watchdog(void)
     printf("Watchdog enabled, timeout = %d seconds.\n", timeout);
 
     return 0;
+}
+void cleanup_watchdog(void)
+{
+    if (watchdog_fd != -1)
+    {
+        // 写入 'V' 禁用看门狗
+        write(watchdog_fd, "V", 1);
+        close(watchdog_fd);
+        watchdog_fd = -1;
+        printf("Watchdog disabled and closed.\n");
+    }
 }

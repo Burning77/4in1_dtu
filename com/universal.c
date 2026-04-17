@@ -18,7 +18,28 @@ extern struct gpiod_line *line_bd_pow;
 extern struct gpiod_line *line_bt_pow;
 extern struct gpiod_line *line_4g_pow;
 extern struct gpiod_line *line_4g_boot;
-
+extern int eg_fd;
+int hex_to_bytes(const char *hex_str, unsigned char *out_bytes, int max_len)
+{
+    if (!hex_str || !out_bytes || max_len <= 0)
+        return -1;
+    int byte_count = 0;
+    const char *p = hex_str;
+    while (*p && byte_count < max_len)
+    {
+        if (*p == ',')
+        {
+            p++;
+            continue;
+        }
+        unsigned int byte;
+        if (sscanf(p, "%2x", &byte) != 1)
+            break;
+        out_bytes[byte_count++] = (unsigned char)byte;
+        p += 2;
+    }
+    return byte_count;
+}
 unsigned char calc_checksum(const char *s)
 {
     unsigned char checksum = 0;
@@ -73,12 +94,60 @@ void rf_power_on(void)
     sleep(1);
     gpio_set_value(1, line_4g_boot);
 }
+void rf_power_off(void)
+{
+    gpio_set_value(0, line_bd_en);
+    gpio_set_value(0, line_4g_pow);
+    gpio_set_value(1, line_bt_pow);
+    gpio_set_value(1, line_4g_boot);
+    sleep(1);
+    printf("Powering off 4G module...\n");
+    gpio_set_value(0, line_4g_boot);
+    sleep(1);
+    gpio_set_value(1, line_4g_boot);
+}
+// 静态函数：检查是否为垃圾数据
+static int is_garbage_data(serial_state_t *state)
+{
+    // 过滤条件1：单字节 0x00 数据（RS485 空闲噪声）
+    if (state->frame_len == 1 && state->frame_buf[0] == 0x00)
+    {
+        return 1;
+    }
+
+    // 过滤条件2：全零数据
+    int all_zero = 1;
+    for (int i = 0; i < state->frame_len; i++)
+    {
+        if (state->frame_buf[i] != 0x00)
+        {
+            all_zero = 0;
+            break;
+        }
+    }
+    if (all_zero && state->frame_len > 0)
+    {
+        return 1;
+    }
+
+    return 0;
+}
 
 // 静态函数：提交一帧数据
 static void submit_frame(serial_state_t *state, frame_processor_ctx_t *ctx, const char *reason)
 {
+    printf("[DEBUG SUBMIT] type=%d (0:RS485, 1:RS232, 2:BD), len=%d, reason=%s\n",
+           state->data_type, state->frame_len, reason);
     if (state->frame_len <= 0)
     {
+        return;
+    }
+
+    // 过滤垃圾数据
+    if (is_garbage_data(state))
+    {
+        printf("[%s FILTERED] Garbage data (len=%d, first_byte=0x%02X), skipping\n",
+               state->tag, state->frame_len, state->frame_buf[0]);
         return;
     }
 
@@ -120,7 +189,9 @@ void serial_state_init(serial_state_t *state, int data_type, const char *tag)
 {
     if (!state)
         return;
-
+    memset(state->frame_buf, 0, BUFFER_SIZE); // 防残留数据
+    state->frame_len = 0;
+    state->last_recv = (struct timeval){0};
     memset(state->frame_buf, 0, sizeof(state->frame_buf));
     state->frame_len = 0;
     state->last_recv.tv_sec = 0;
@@ -128,49 +199,53 @@ void serial_state_init(serial_state_t *state, int data_type, const char *tag)
     state->data_type = data_type;
     state->tag = tag;
 }
+#include <sys/time.h>
+#include <string.h>
 
-// 处理串口数据
-void process_serial_data(serial_state_t *state,
-                         unsigned char *read_buf, int read_len,
-                         int is_timeout_triggered,
-                         frame_processor_ctx_t *ctx)
+void process_serial_data(serial_state_t *state, unsigned char *read_buf, int read_len, int is_timeout_triggered, frame_processor_ctx_t *ctx)
 {
+    // 1. 仅校验指针，绝不因 frame_len == 0 拦截新数据
     if (!state || !ctx)
-    {
         return;
-    }
 
     struct timeval now;
     gettimeofday(&now, NULL);
 
-    // 计算距离上次接收的时间差（毫秒）
+    // 2. 安全计算时间差（处理微秒借位）
     long diff_ms = 0;
     if (state->frame_len > 0)
     {
-        diff_ms = (now.tv_sec - state->last_recv.tv_sec) * 1000 +
-                  (now.tv_usec - state->last_recv.tv_usec) / 1000;
+        long sec_diff = now.tv_sec - state->last_recv.tv_sec;
+        long usec_diff = now.tv_usec - state->last_recv.tv_usec;
+        if (usec_diff < 0)
+        {
+            sec_diff--;
+            usec_diff += 1000000;
+        }
+        diff_ms = sec_diff * 1000 + usec_diff / 1000;
     }
+
+    // 3. 超时处理：提交旧帧后清空缓冲，但绝对不能 return！
     if (state->frame_len > 0 && diff_ms > FRAME_TIMEOUT_MS)
     {
         submit_frame(state, ctx, "timeout");
-        state->frame_len = 0;
-        // 提交后，如果本次有 read_len > 0，下面会处理新数据
-    }
-    if (state->frame_len >= MAX_LOG_LEN)
-    {
-        submit_frame(state, ctx, "max_len");
-        state->frame_len = 0;
+        state->frame_len = 0; // 释放空间，准备承接本次可能带来的新数据
     }
 
-    // 情况A: 有新数据到达
+    // 4. 处理本次到达的新数据（无论是否刚发生过超时）
     if (read_len > 0)
     {
-        // 检查缓冲区是否有足够空间
-        if (state->frame_len + read_len < BUFFER_SIZE)
+        // 防驱动异常返回超大值导致越界
+        if (read_len > BUFFER_SIZE)
+            read_len = BUFFER_SIZE;
+
+        if (state->frame_len + read_len <= BUFFER_SIZE)
         {
             memcpy(state->frame_buf + state->frame_len, read_buf, read_len);
             state->frame_len += read_len;
-            state->last_recv = now; // 更新最后接收时间
+            state->last_recv = now; // 更新活跃时间戳
+
+            // 达到最大逻辑帧长，立即提交
             if (state->frame_len >= MAX_LOG_LEN)
             {
                 submit_frame(state, ctx, "max_len");
@@ -179,21 +254,82 @@ void process_serial_data(serial_state_t *state,
         }
         else
         {
-            // 缓冲区溢出，提交当前帧
+            // 缓冲区不足：先提交已累积帧
             submit_frame(state, ctx, "overflow");
             state->frame_len = 0;
-            // 尝试存储新数据
-            if (read_len < BUFFER_SIZE)
-            {
-                memcpy(state->frame_buf, read_buf, read_len);
-                state->frame_len = read_len;
-                state->last_recv = now;
-            }
+            // 策略：保留新数据防丢（若协议允许分包）
+            memcpy(state->frame_buf, read_buf, read_len);
+            state->frame_len = read_len;
+            state->last_recv = now;
         }
-        return;
     }
-    return;
 }
+
+// // 处理串口数据
+// void process_serial_data(serial_state_t *state,
+//                          unsigned char *read_buf, int read_len,
+//                          int is_timeout_triggered,
+//                          frame_processor_ctx_t *ctx)
+// {
+//     if (!state || !ctx)
+//     {
+//         return;
+//     }
+
+//     struct timeval now;
+//     gettimeofday(&now, NULL);
+
+//     // 计算距离上次接收的时间差（毫秒）
+//     long diff_ms = 0;
+//     if (state->frame_len > 0)
+//     {
+//         diff_ms = (now.tv_sec - state->last_recv.tv_sec) * 1000 +
+//                   (now.tv_usec - state->last_recv.tv_usec) / 1000;
+//     }
+//     if (state->frame_len > 0 && diff_ms > FRAME_TIMEOUT_MS)
+//     {
+//         submit_frame(state, ctx, "timeout");
+//         state->frame_len = 0;
+//         // 提交后，如果本次有 read_len > 0，下面会处理新数据
+//     }
+//     if (state->frame_len >= MAX_LOG_LEN)
+//     {
+//         submit_frame(state, ctx, "max_len");
+//         state->frame_len = 0;
+//     }
+
+//     // 情况A: 有新数据到达
+//     if (read_len > 0)
+//     {
+//         // 检查缓冲区是否有足够空间
+//         if (state->frame_len + read_len < BUFFER_SIZE)
+//         {
+//             memcpy(state->frame_buf + state->frame_len, read_buf, read_len);
+//             state->frame_len += read_len;
+//             state->last_recv = now; // 更新最后接收时间
+//             if (state->frame_len >= MAX_LOG_LEN)
+//             {
+//                 submit_frame(state, ctx, "max_len");
+//                 state->frame_len = 0;
+//             }
+//         }
+//         else
+//         {
+//             // 缓冲区溢出，提交当前帧
+//             submit_frame(state, ctx, "overflow");
+//             state->frame_len = 0;
+//             // 尝试存储新数据
+//             if (read_len < BUFFER_SIZE)
+//             {
+//                 memcpy(state->frame_buf, read_buf, read_len);
+//                 state->frame_len = read_len;
+//                 state->last_recv = now;
+//             }
+//         }
+//         return;
+//     }
+//     return;
+// }
 
 // 强制提交缓冲区中的残留帧
 void flush_serial_state(serial_state_t *state, frame_processor_ctx_t *ctx)
@@ -209,40 +345,64 @@ void flush_serial_state(serial_state_t *state, frame_processor_ctx_t *ctx)
         state->frame_len = 0;
     }
 }
-int load_offsets(const char *path, off_t *offsets, int count) {
+int load_offsets(const char *path, off_t *offsets, int count)
+{
     int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        if (errno == ENOENT) {
+    if (fd < 0)
+    {
+        if (errno == ENOENT)
+        {
             memset(offsets, 0, sizeof(off_t) * count);
-            return 0;  // 首次运行，无历史数据
+            return 0; // 首次运行，无历史数据
         }
         perror("load_offsets open");
         return -1;
     }
     ssize_t n = read(fd, offsets, sizeof(off_t) * count);
     close(fd);
-    if (n != sizeof(off_t) * count) {
+    if (n != sizeof(off_t) * count)
+    {
         // 文件内容不完整，重置为0
         memset(offsets, 0, sizeof(off_t) * count);
     }
     return 0;
 }
 
-int save_offsets(const char *path, const off_t *offsets, int count) {
+int save_offsets(const char *path, const off_t *offsets, int count)
+{
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         perror("save_offsets open");
         return -1;
     }
     ssize_t n = write(fd, offsets, sizeof(off_t) * count);
     close(fd);
-    if (n != sizeof(off_t) * count) {
+    if (n != sizeof(off_t) * count)
+    {
         perror("save_offsets write");
         return -1;
     }
     return 0;
 }
-
+// 将原始数据打包成北斗协议并发送
+int bd_send_packet(const unsigned char *data, int len)
+{
+    char hex_buf[BD_MSG_LEN + 64];
+    char msg[512];
+    // 将原始数据转换为十六进制字符串（无逗号分隔）
+    char *p = hex_buf;
+    for (int i = 0; i < len && (p - hex_buf) < BD_MSG_LEN - 2; i++)
+    {
+        p += sprintf(p, "%02X", data[i]);
+    }
+    // 构造报文
+    snprintf(msg, sizeof(msg), "$CCTCQ,4314513,2,1,2,,%s*", hex_buf);
+    unsigned char cs = calc_checksum(msg);
+    size_t msg_len = strlen(msg);
+    snprintf(msg + msg_len, sizeof(msg) - msg_len, "%02X\r\n", cs);
+    return data_send((unsigned char *)msg, strlen(msg), BD_DEV);
+}
 /**
  * 从多个日志文件中读取新行，解析原始数据并打包成十六进制字符串（以逗号分隔）。
  * 每个线程独立维护自己的文件偏移量，互不干扰。

@@ -11,10 +11,18 @@
 #define BT_POW_LINE 29
 #define EG_POW_CHIP "/dev/gpiochip3"
 #define EG_POW_LINE 19
+#define EG_BOOT_CHIP "/dev/gpiochip3"
+#define EG_BOOT_LINE 3
+#define EG_STATE_CHIP "/dev/gpiochip3"
+#define EG_STATE_LINE 1
+#define EG_SLEEP_CHIP "/dev/gpiochip3"
+#define EG_SLEEP_LINE 27
 #define BT_IDLE_CHIP "/dev/gpiochip4"
 #define BT_IDLE_LINE 12
 #define BT_STATUS_CHIP "/dev/gpiochip4"
 #define BT_STATUS_LINE 10
+#define USB_POW_CHIP "/dev/gpiochip3"
+#define USB_POW_LINE 2
 
 struct gpiod_chip *chip_rs485 = NULL;
 struct gpiod_line *line_rs485 = NULL;
@@ -26,10 +34,18 @@ struct gpiod_chip *chip_bt_pow = NULL;
 struct gpiod_line *line_bt_pow = NULL;
 struct gpiod_chip *chip_4g_pow = NULL;
 struct gpiod_line *line_4g_pow = NULL;
+struct gpiod_chip *chip_4g_boot = NULL;
+struct gpiod_line *line_4g_boot = NULL;
+struct gpiod_chip *chip_4g_state = NULL;
+struct gpiod_line *line_4g_state = NULL;
+struct gpiod_chip *chip_4g_sleep = NULL;
+struct gpiod_line *line_4g_sleep = NULL;
 struct gpiod_chip *chip_bt_idle = NULL;
 struct gpiod_line *line_bt_idle = NULL;
 struct gpiod_chip *chip_bt_status = NULL;
 struct gpiod_line *line_bt_status = NULL;
+struct gpiod_chip *chip_usb_pow = NULL;
+struct gpiod_line *line_usb_pow = NULL;
 int gpio_init()
 {
     chip_rs485 = gpiod_chip_open(RS485_GPIO_CHIP);
@@ -110,22 +126,59 @@ int gpio_init()
     if (gpiod_line_request_output(line_bt_idle, "bt_idle", 0) < 0)
     {
         perror("gpiod_line_request_output bt_idle");
-        gpiod_chip_close(chip_bt_idle); 
+        gpiod_chip_close(chip_bt_idle);
         return -1;
     }
 
     chip_bt_status = gpiod_chip_open(BT_STATUS_CHIP);
     line_bt_status = gpiod_chip_get_line(chip_bt_status, BT_STATUS_LINE);
-    // 请求为输出，初始值为1
+    // 请求为输入
     if (gpiod_line_request_input(line_bt_status, "bt_status") < 0)
     {
         perror("gpiod_line_request_input bt_status");
         gpiod_chip_close(chip_bt_status);
         return -1;
     }
+
+    chip_4g_boot = gpiod_chip_open(EG_BOOT_CHIP);
+    line_4g_boot = gpiod_chip_get_line(chip_4g_boot, EG_BOOT_LINE);
+    // 请求为输出，默认初始为1
+    if (gpiod_line_request_output(line_4g_boot, "4g_boot", 1) < 0)
+    {
+        perror("gpiod_line_request_output 4g_boot");
+        gpiod_chip_close(chip_4g_boot);
+        return -1;
+    }
+
+    chip_4g_state = gpiod_chip_open(EG_STATE_CHIP);
+    line_4g_state = gpiod_chip_get_line(chip_4g_state, EG_STATE_LINE);
+    // 请求为输入
+    if (gpiod_line_request_input(line_4g_state, "4g_state") < 0)
+    {
+        perror("gpiod_line_request_input 4g_state");
+        gpiod_chip_close(chip_4g_state);
+        return -1;
+    }
+    chip_4g_sleep = gpiod_chip_open(EG_SLEEP_CHIP);
+    line_4g_sleep = gpiod_chip_get_line(chip_4g_sleep, EG_SLEEP_LINE);
+    // 请求为输出，默认初始为1
+    if (gpiod_line_request_output(line_4g_sleep, "4g_sleep", 0) < 0)
+    {
+        perror("gpiod_line_request_output 4g_sleep");
+        gpiod_chip_close(chip_4g_sleep);
+        return -1;
+    }
+    chip_usb_pow = gpiod_chip_open(USB_POW_CHIP);
+    line_usb_pow = gpiod_chip_get_line(chip_usb_pow, USB_POW_LINE);
+    // 请求为输出，默认初始为1
+    if (gpiod_line_request_output(line_usb_pow, "4g_usb_pow", 1) < 0)
+    {
+        perror("gpiod_line_request_output usb_pow");
+        gpiod_chip_close(chip_usb_pow);
+        return -1;
+    }
     return 0;
 }
-
 
 void gpio_set_value(int value, struct gpiod_line *line)
 {

@@ -12,6 +12,8 @@
 #define BD_BAUD    B115200
 #define BT_DEV    "/dev/ttyS4"
 #define BT_BAUD    B115200
+#define EG_DEV    "/dev/ttyUSB2"
+#define EG_BAUD    B115200
 // 初始化串口，设置为阻塞模式
 // 返回文件描述符，失败返回-1
 int uart_init(const char *dev, speed_t baud);
