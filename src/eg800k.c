@@ -13,52 +13,107 @@ extern int eg_fd;
 extern atomic_int stop_flag;
 
 // 发送 AT 命令并等待指定响应（带超时，可被 stop_flag 中断）
+// int eg_send_cmd(const char *cmd, const char *expected_resp, int timeout_sec)
+// {
+//     char buf[512];
+//     data_send((unsigned char *)cmd, strlen(cmd), EG_DEV);
+
+//     fd_set fds;
+//     struct timeval tv;
+//     int ret;
+//     int elapsed = 0;
+
+//     // 使用 1 秒超时循环，检查 stop_flag
+//     while (elapsed < timeout_sec && !stop_flag)
+//     {
+//         FD_ZERO(&fds);
+//         FD_SET(eg_fd, &fds);
+//         tv.tv_sec = 1;
+//         tv.tv_usec = 0;
+
+//         ret = select(eg_fd + 1, &fds, NULL, NULL, &tv);
+//         if (ret > 0)
+//         {
+//             int n = data_recv(buf, sizeof(buf) - 1, EG_DEV);
+//             if (n <= 0)
+//                 return -1;
+//             buf[n] = '\0';
+
+//             if (expected_resp && strstr(buf, expected_resp) == NULL)
+//             {
+//                 printf("[EG] Unexpected response: %s\r\n", buf);
+//                 return -1;
+//             }
+//             return 0;
+//         }
+//         elapsed++;
+//     }
+
+//     if (stop_flag)
+//     {
+//         printf("[EG] Command interrupted by stop_flag\n");
+//         return -1;
+//     }
+
+//     printf("[EG] Timeout waiting for response to: %s\n", cmd);
+//     return -1;
+// }
 int eg_send_cmd(const char *cmd, const char *expected_resp, int timeout_sec)
 {
-    char buf[512];
-    data_send((unsigned char *)cmd, strlen(cmd), EG_DEV);
-
+    char buf[512] = {0};
+    int total = 0;
     fd_set fds;
-    struct timeval tv;
-    int ret;
-    int elapsed = 0;
+    struct timeval tv, start, now;
 
-    // 使用 1 秒超时循环，检查 stop_flag
-    while (elapsed < timeout_sec && !stop_flag)
-    {
+    // 发送命令前清空接收缓冲区（可选，避免残留数据干扰）
+    tcflush(eg_fd, TCIFLUSH);
+    data_send((unsigned char *)cmd, strlen(cmd), EG_DEV);
+    printf("[EG] Sent: %s", cmd);
+
+    gettimeofday(&start, NULL);
+    while (!stop_flag) {
+        // 计算是否超时
+        gettimeofday(&now, NULL);
+        long elapsed = (now.tv_sec - start.tv_sec) * 1000 + 
+                       (now.tv_usec - start.tv_usec) / 1000;
+        if (elapsed >= timeout_sec * 1000) {
+            printf("[EG] Timeout: %s", cmd);
+            return -1;
+        }
+
         FD_ZERO(&fds);
         FD_SET(eg_fd, &fds);
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000; // 200ms 等待新数据
 
-        ret = select(eg_fd + 1, &fds, NULL, NULL, &tv);
-        if (ret > 0)
-        {
-            int n = data_recv(buf, sizeof(buf) - 1, EG_DEV);
-            if (n <= 0)
-                return -1;
-            buf[n] = '\0';
-
-            if (expected_resp && strstr(buf, expected_resp) == NULL)
-            {
-                printf("[EG] Unexpected response: %s\n", buf);
-                return -1;
-            }
-            return 0;
+        int ret = select(eg_fd + 1, &fds, NULL, NULL, &tv);
+        if (ret < 0) {
+            if (stop_flag) break;
+            continue;
         }
-        elapsed++;
-    }
+        if (ret == 0) continue;
 
-    if (stop_flag)
-    {
+        // 读取新数据并追加
+        int n = data_recv(buf + total, sizeof(buf) - 1 - total, EG_DEV);
+        if (n > 0) {
+            total += n;
+            buf[total] = '\0';
+            printf("[EG] Recv: %s\n", buf);
+            
+            // 如果收到预期响应则成功
+            if (expected_resp && strstr(buf, expected_resp))
+                return 0;
+            // 如果收到 ERROR 则提前失败
+            if (strstr(buf, "ERROR"))
+                return -1;
+        }
+    }
+    
+    if (stop_flag) {
         printf("[EG] Command interrupted by stop_flag\n");
-        return -1;
     }
-
-    printf("[EG] Timeout waiting for response to: %s\n", cmd);
     return -1;
 }
-
 // 初始化 4G 模块（仅执行一次）
 int eg_init(void)
 {
@@ -67,7 +122,11 @@ int eg_init(void)
     // 1. AT 同步
     if (eg_send_cmd("AT\r\n", "OK", 2) != 0)
         return -1;
-
+    if (eg_send_cmd("ATI\r\n", "Revision", 8) != 0)
+    {
+        printf("[EG] Module not responding correctly to ATI\n");
+        return -1;
+    }
     // 2. 查询 SIM 卡
     if (eg_send_cmd("AT+CPIN?\r\n", "READY", 5) != 0)
     {
@@ -87,7 +146,7 @@ int eg_init(void)
 
     // 5. 配置 APN（请根据 SIM 卡运营商修改）
     // 中国联通: "UNINET", 中国移动: "CMNET", 中国电信: "CTNET"
-    if (eg_send_cmd("AT+QICSGP=1,1,\"UNINET\",\"\",\"\",1\r\n", "OK", 5) != 0)
+    if (eg_send_cmd("AT+QICSGP=1,1,\"CMNET\",\"\",\"\",1\r\n", "OK", 5) != 0)
     {
         printf("[EG] APN configuration failed\n");
         return -1;
@@ -112,6 +171,7 @@ int eg_send_data(const unsigned char *data, int len)
     char cmd[32];
     snprintf(cmd, sizeof(cmd), "AT+QISEND=%d,%d\r\n", eg_connect_id, len);
 
+    
     // 发送命令，等待 '>' 提示符
     data_send((unsigned char *)cmd, strlen(cmd), EG_DEV);
 

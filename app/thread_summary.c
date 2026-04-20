@@ -23,6 +23,9 @@ static volatile int g_4g_available = 0; // 0=不可用, 1=可用
 static pthread_mutex_t g_4g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_pdp_deact = 0;
 static pthread_mutex_t g_pdp_mutex = PTHREAD_MUTEX_INITIALIZER;
+// 4G 初始化完成标志（防止 receive_thread 抢占 eg_fd 数据）
+static volatile int g_eg_init_done = 0;
+static pthread_mutex_t g_eg_init_mutex = PTHREAD_MUTEX_INITIALIZER;
 extern int rs485_fd;
 extern int rs232_fd;
 extern int bd_fd;
@@ -118,6 +121,8 @@ void *receive_thread(void *arg)
             // 检查是否有 PDP 去激活 URC
             if (eg_read_len > 0)
             {
+                buf[eg_read_len] = '\0';
+                printf("[EG DEBUG] Received: [%s]\n", buf);
                 char *urc = strstr((char *)buf, "+QIURC: \"pdpdeact\"");
                 if (urc != NULL)
                 {
@@ -144,7 +149,7 @@ void *serial_send_thread(void *arg)
 {
     const char *test = "Hello from rs232!\r\n";
     const char *bt_test = "AT+VER=?\r\n";
-    const char *eg_cmd = "ATI\r\n";
+    // 注意：不再从此线程发送 EG 命令，避免与 main_send_thread 的 eg_init() 冲突
     while (!stop_flag)
     {
         sleep(SEND_INTERVAL);
@@ -155,7 +160,6 @@ void *serial_send_thread(void *arg)
         int resualt = data_send(test, strlen(test), RS232_DEV);
         int ret = data_send(CMD_STRING, strlen(CMD_STRING), RS485_DEV);
         int res_bd = data_send(BD_CARD, strlen(BD_CARD), BD_DEV);
-        int ret_eg = data_send(eg_cmd, strlen(eg_cmd), EG_DEV);
         int res_bt = data_send(bt_test, strlen(bt_test), BT_DEV);
         if (resualt < 0)
         {
@@ -172,10 +176,6 @@ void *serial_send_thread(void *arg)
         if (res_bt < 0)
         {
             perror("bt_send");
-        }
-        if (ret_eg < 0)
-        {
-            perror("eg_send");
         }
     }
     return NULL;
@@ -240,22 +240,23 @@ void *write_file_thread(void *arg)
         // 选择文件 - 根据数据类型选择对应的日志文件
         FILE **fp = NULL;
         const char *path = NULL;
-        switch (msg.type) {
-            case RS485_DATA:
-                fp = &fp_485;
-                path = RS485_LOG_PATH;
-                break;
-            case RS232_DATA:
-                fp = &fp_232;
-                path = RS232_LOG_PATH;
-                break;
-            case BD_DATA:
-                fp = &fp_bd;
-                path = BD_LOG_PATH;
-                break;
-            default:
-                printf("[WARN] Unknown data type: %d, skipping\n", msg.type);
-                continue;  // 跳过未知类型
+        switch (msg.type)
+        {
+        case RS485_DATA:
+            fp = &fp_485;
+            path = RS485_LOG_PATH;
+            break;
+        case RS232_DATA:
+            fp = &fp_232;
+            path = RS232_LOG_PATH;
+            break;
+        case BD_DATA:
+            fp = &fp_bd;
+            path = BD_LOG_PATH;
+            break;
+        default:
+            printf("[WARN] Unknown data type: %d, skipping\n", msg.type);
+            continue; // 跳过未知类型
         }
 
         if (*fp == NULL)
@@ -488,6 +489,17 @@ void *lora_transform_thread(void *arg)
 
 void *eg_monitor_thread(void *arg)
 {
+    // 等待 4G 初始化完成
+    while (!stop_flag)
+    {
+        pthread_mutex_lock(&g_eg_init_mutex);
+        int init_done = g_eg_init_done;
+        pthread_mutex_unlock(&g_eg_init_mutex);
+        if (init_done)
+            break;
+        sleep(1);
+    }
+    
     while (!stop_flag)
     {
         int available = eg_is_network_available();
@@ -548,6 +560,11 @@ void *main_send_thread(void *arg)
                 sleep(1);
         }
     }
+
+    // 标记 4G 初始化完成，允许 eg_monitor_thread 开始工作
+    pthread_mutex_lock(&g_eg_init_mutex);
+    g_eg_init_done = 1;
+    pthread_mutex_unlock(&g_eg_init_mutex);
 
     // ========== 2. 主循环：发送数据 ==========
     while (!stop_flag)
@@ -698,10 +715,14 @@ void *main_send_thread(void *arg)
     return NULL;
 }
 
-void *watchdog_feed_thread(void *arg) {
-    while (!stop_flag) {
-        if (watchdog_fd != -1) {
-            if (write(watchdog_fd, "\0", 1) != 1) {
+void *watchdog_feed_thread(void *arg)
+{
+    while (!stop_flag)
+    {
+        if (watchdog_fd != -1)
+        {
+            if (write(watchdog_fd, "\0", 1) != 1)
+            {
                 perror("watchdog write");
             }
         }

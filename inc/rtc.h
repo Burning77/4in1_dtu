@@ -14,6 +14,8 @@
 #define USER_RAM_START  0x40
 #define USER_RAM_SIZE   16   // 128位 = 16字节
 
+int rtc_set_alarm(int rtc_fd, int seconds);
 int rtc_set_time(struct rtc_time *rtc_tm);
 int rtc_get_time(int fd, struct rtc_time *tm);
+void rtc_clear_alarm(int rtc_fd);
 #endif

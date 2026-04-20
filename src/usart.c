@@ -32,17 +32,10 @@ int uart_init(const char *dev, speed_t baud)
 
     options.c_cflag |= (CLOCAL | CREAD);
     options.c_cflag &= ~CSIZE;
-    options.c_cflag |= CS8;     // 8位数据
-    options.c_cflag &= ~PARENB; // 无校验
-    options.c_cflag &= ~CSTOPB; // 1停止位
-    // if (strncmp(dev, EG_DEV, strlen(EG_DEV)) == 0)
-    // {
-        // options.c_cflag |= CRTSCTS; // EG模块使用硬件流控
-    // }
-    // else
-    // {
-        options.c_cflag &= ~CRTSCTS; // 无硬件流控
-    // }
+    options.c_cflag |= CS8;                             // 8位数据
+    options.c_cflag &= ~PARENB;                         // 无校验
+    options.c_cflag &= ~CSTOPB;                         // 1停止位
+    options.c_cflag &= ~CRTSCTS;                        // 无硬件流控
     options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG); // 原始模式
     options.c_iflag &= ~(IXON | IXOFF | IXANY);         // 无软件流控
     options.c_iflag &= ~(INLCR | ICRNL | IGNCR);

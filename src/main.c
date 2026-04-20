@@ -83,7 +83,8 @@ int main(int argc, char *argv[])
     // printf("flow check\n");
     // check_hardware_flow_control(eg_fd);
     // printf("check over\r\n");
-    // char cmd[] = "AT\r\n";
+    // eg_init();
+    // char cmd[] = "AT+CEREG?\r\n";
     // printf("write cmd to eg\r\n");
     // write(eg_fd, cmd, strlen(cmd));
     // printf("write cmd to eg over\r\n");
