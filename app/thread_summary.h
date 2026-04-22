@@ -19,6 +19,7 @@
 #include "../inc/kfifo.h"
 #include <time.h>
 #include "llcc68.h"
+#include "../inc/bluetooth.h"
 
 #define OFFSET_FILE_MAIN   "/home/cat/send_offset.dat"
 #define OFFSET_FILE_LORA "/home/cat/send_offset_lora.dat"

@@ -322,7 +322,7 @@ int eg_is_network_available(void)
 }
 int eg_connect(void)
 {
-    const char *tcp_cmd = "AT+QIOPEN=1,0,\"TCP\",\"115.120.239.161\",28187,0,0\r\n";
+    const char *tcp_cmd = "AT+QIOPEN=1,0,\"TCP\",\"115.120.239.161\",23457,0,0\r\n";
     char buf[256];
     char total_buf[512] = {0};
     int total_len = 0;
@@ -332,7 +332,7 @@ int eg_connect(void)
     sleep(1);
     tcflush(eg_fd, TCIFLUSH);
 
-    printf("[EG] Connecting to 115.120.239.161:28187...\n");
+    printf("[EG] Connecting to 115.120.239.161:23457...\n");
     data_send((unsigned char *)tcp_cmd, strlen(tcp_cmd), EG_DEV);
 
     // 等待 +QIOPEN: 0,x （最长 60 秒，可被 stop_flag 中断）

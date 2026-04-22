@@ -1,6 +1,7 @@
 #include "../app/thread_summary.h"
 #include "../inc/eg800k.h"
 #include "../inc/watch_dog.h"
+#include "../inc/bluetooth.h"
 extern struct kfifo data_fifo;
 
 static pthread_mutex_t fifo_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -26,6 +27,10 @@ static pthread_mutex_t g_pdp_mutex = PTHREAD_MUTEX_INITIALIZER;
 // 4G 初始化完成标志（防止 receive_thread 抢占 eg_fd 数据）
 static volatile int g_eg_init_done = 0;
 static pthread_mutex_t g_eg_init_mutex = PTHREAD_MUTEX_INITIALIZER;
+// 发送统计
+static uint32_t g_send_count_4g = 0;
+static uint32_t g_send_count_bd = 0;
+static uint32_t g_send_fail_count = 0;
 extern int rs485_fd;
 extern int rs232_fd;
 extern int bd_fd;
@@ -517,7 +522,6 @@ void *main_send_thread(void *arg)
     off_t offsets[2] = {0, 0};
     int hex_len, entry_count;
     char hex_buf[EG_MSG_LEN + 64];
-    int use_4g = 0;
     time_t last_bd_send_time = 0;
     const int BD_SEND_INTERVAL = 60;
 
@@ -578,16 +582,13 @@ void *main_send_thread(void *arg)
         if (need_reinit_pdp)
         {
             printf("[MAIN] PDP deactivated by network, re-initializing...\n");
-            // 关闭旧连接
             eg_send_cmd("AT+QICLOSE=0\r\n", "OK", 5);
-            // 重新激活 PDP
             if (eg_reinit_pdp() == 0)
             {
                 pthread_mutex_lock(&g_pdp_mutex);
                 g_pdp_deact = 0;
                 pthread_mutex_unlock(&g_pdp_mutex);
                 eg_connected = 1;
-                // 更新 4G 可用标志
                 pthread_mutex_lock(&g_4g_mutex);
                 g_4g_available = 1;
                 pthread_mutex_unlock(&g_4g_mutex);
@@ -598,13 +599,12 @@ void *main_send_thread(void *arg)
                 pthread_mutex_lock(&g_4g_mutex);
                 g_4g_available = 0;
                 pthread_mutex_unlock(&g_4g_mutex);
-                // 等待一段时间后重试
                 sleep(30);
                 continue;
             }
         }
 
-        // 从监测线程获取 4G 可用性
+        // 获取 4G 可用性
         pthread_mutex_lock(&g_4g_mutex);
         int current_4g_avail = g_4g_available;
         pthread_mutex_unlock(&g_4g_mutex);
@@ -624,9 +624,15 @@ void *main_send_thread(void *arg)
             }
         }
 
-        use_4g = (current_4g_avail && eg_connected);
-        printf("[MAIN DEBUG] 4g_avail=%d, eg_connected=%d, use_4g=%d\n", 
-               current_4g_avail, eg_connected, use_4g);
+        // 获取蓝牙设置的发送路径
+        send_path_t send_path = bt_get_send_path();
+        int can_use_4g = (current_4g_avail && eg_connected);
+        
+        // 更新蓝牙状态
+        bt_update_status(eg_connected, 99, g_send_count_4g, g_send_count_bd, g_send_fail_count);
+
+        printf("[MAIN] path=%d, 4g_avail=%d, eg_connected=%d\n", 
+               send_path, current_4g_avail, eg_connected);
 
         // 从文件打包数据
         if (pack_data_from_files(paths, offsets, 2, EG_MSG_LEN,
@@ -639,64 +645,153 @@ void *main_send_thread(void *arg)
                 if (raw_len > 0)
                 {
                     int send_ok = 0;
+                    int tried_4g = 0;
+                    int tried_bd = 0;
 
-                    if (use_4g)
+                    // 根据发送路径选择发送方式
+                    switch (send_path)
                     {
-                        // 尝试 4G 发送
-                        if (eg_send_data(raw_data, raw_len) == 0)
-                        {
-                            send_ok = 1;
-                            printf("[MAIN] Sent %d bytes via 4G\n", raw_len);
-                        }
-                        else
-                        {
-                            // 4G 发送失败，尝试重连（不去激活 PDP）
-                            printf("[MAIN] 4G send failed, trying reconnect...\n");
-                            eg_send_cmd("AT+QICLOSE=0\r\n", "OK", 5);
-                            if (eg_connect() == 0)
+                        case SEND_PATH_4G_ONLY:
+                            // 仅4G发送
+                            if (can_use_4g)
                             {
-                                eg_connected = 1;
+                                tried_4g = 1;
                                 if (eg_send_data(raw_data, raw_len) == 0)
                                 {
                                     send_ok = 1;
-                                    printf("[MAIN] Sent %d bytes via 4G after reconnect\n", raw_len);
+                                    g_send_count_4g++;
+                                    printf("[MAIN] Sent %d bytes via 4G (4G_ONLY)\n", raw_len);
+                                }
+                            }
+                            if (!send_ok)
+                            {
+                                printf("[MAIN] 4G_ONLY mode: 4G unavailable or send failed\n");
+                                g_send_fail_count++;
+                            }
+                            break;
+
+                        case SEND_PATH_BD_ONLY:
+                            // 仅北斗发送
+                            {
+                                time_t now = time(NULL);
+                                if (now - last_bd_send_time >= BD_SEND_INTERVAL)
+                                {
+                                    tried_bd = 1;
+                                    if (bd_send_packet(raw_data, raw_len) == 0)
+                                    {
+                                        send_ok = 1;
+                                        last_bd_send_time = now;
+                                        g_send_count_bd++;
+                                        printf("[MAIN] Sent %d bytes via BD (BD_ONLY)\n", raw_len);
+                                    }
+                                    else
+                                    {
+                                        printf("[MAIN] BD_ONLY mode: BD send failed\n");
+                                        g_send_fail_count++;
+                                    }
                                 }
                                 else
                                 {
-                                    printf("[MAIN] 4G send still failed after reconnect\n");
-                                    eg_connected = 0;
+                                    printf("[MAIN] BD_ONLY mode: waiting for interval (%ld sec left)\n",
+                                           BD_SEND_INTERVAL - (now - last_bd_send_time));
                                 }
                             }
-                            else
-                            {
-                                printf("[MAIN] 4G reconnect failed\n");
-                                eg_connected = 0;
-                            }
-                        }
-                    }
+                            break;
 
-                    if (!send_ok)
-                    {
-                        // 切换到北斗，需满足 60 秒间隔
-                        time_t now = time(NULL);
-                        if (now - last_bd_send_time >= BD_SEND_INTERVAL)
-                        {
-                            if (bd_send_packet(raw_data, raw_len) == 0)
+                        case SEND_PATH_BD_FIRST:
+                            // 北斗优先
                             {
-                                send_ok = 1;
-                                last_bd_send_time = now;
-                                printf("[MAIN] Sent %d bytes via BD\n", raw_len);
+                                time_t now = time(NULL);
+                                if (now - last_bd_send_time >= BD_SEND_INTERVAL)
+                                {
+                                    tried_bd = 1;
+                                    if (bd_send_packet(raw_data, raw_len) == 0)
+                                    {
+                                        send_ok = 1;
+                                        last_bd_send_time = now;
+                                        g_send_count_bd++;
+                                        printf("[MAIN] Sent %d bytes via BD (BD_FIRST)\n", raw_len);
+                                    }
+                                }
+                                // 北斗失败或间隔未到，尝试4G
+                                if (!send_ok && can_use_4g)
+                                {
+                                    tried_4g = 1;
+                                    if (eg_send_data(raw_data, raw_len) == 0)
+                                    {
+                                        send_ok = 1;
+                                        g_send_count_4g++;
+                                        printf("[MAIN] Sent %d bytes via 4G (BD_FIRST fallback)\n", raw_len);
+                                    }
+                                }
                             }
-                            else
+                            break;
+
+                        case SEND_PATH_AUTO:
+                        case SEND_PATH_4G_FIRST:
+                        default:
+                            // 自动或4G优先：先尝试4G，失败则北斗
+                            if (can_use_4g)
                             {
-                                printf("[MAIN] BD send failed\n");
+                                tried_4g = 1;
+                                if (eg_send_data(raw_data, raw_len) == 0)
+                                {
+                                    send_ok = 1;
+                                    g_send_count_4g++;
+                                    printf("[MAIN] Sent %d bytes via 4G\n", raw_len);
+                                }
+                                else
+                                {
+                                    // 4G发送失败，尝试重连
+                                    printf("[MAIN] 4G send failed, trying reconnect...\n");
+                                    eg_send_cmd("AT+QICLOSE=0\r\n", "OK", 5);
+                                    if (eg_connect() == 0)
+                                    {
+                                        eg_connected = 1;
+                                        if (eg_send_data(raw_data, raw_len) == 0)
+                                        {
+                                            send_ok = 1;
+                                            g_send_count_4g++;
+                                            printf("[MAIN] Sent %d bytes via 4G after reconnect\n", raw_len);
+                                        }
+                                        else
+                                        {
+                                            eg_connected = 0;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        eg_connected = 0;
+                                    }
+                                }
                             }
-                        }
-                        else
-                        {
-                            printf("[MAIN] BD send limited (last sent %ld seconds ago), waiting...\n",
-                                   now - last_bd_send_time);
-                        }
+
+                            // 4G失败，尝试北斗
+                            if (!send_ok)
+                            {
+                                time_t now = time(NULL);
+                                if (now - last_bd_send_time >= BD_SEND_INTERVAL)
+                                {
+                                    tried_bd = 1;
+                                    if (bd_send_packet(raw_data, raw_len) == 0)
+                                    {
+                                        send_ok = 1;
+                                        last_bd_send_time = now;
+                                        g_send_count_bd++;
+                                        printf("[MAIN] Sent %d bytes via BD (fallback)\n", raw_len);
+                                    }
+                                    else
+                                    {
+                                        printf("[MAIN] BD send failed\n");
+                                    }
+                                }
+                                else
+                                {
+                                    printf("[MAIN] BD interval not reached (%ld sec left)\n",
+                                           BD_SEND_INTERVAL - (now - last_bd_send_time));
+                                }
+                            }
+                            break;
                     }
 
                     if (send_ok)
@@ -705,13 +800,15 @@ void *main_send_thread(void *arg)
                     }
                     else
                     {
-                        printf("[MAIN] All channels failed or limited, will retry same data later\n");
+                        g_send_fail_count++;
+                        printf("[MAIN] All channels failed (tried_4g=%d, tried_bd=%d)\n", 
+                               tried_4g, tried_bd);
                     }
                 }
             }
             else
             {
-                printf("[MAIN] No new data, sleeping...\n");
+                // printf("[MAIN] No new data, sleeping...\n");
             }
         }
         else
