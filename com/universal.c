@@ -136,8 +136,8 @@ static int is_garbage_data(serial_state_t *state)
 // 静态函数：提交一帧数据
 static void submit_frame(serial_state_t *state, frame_processor_ctx_t *ctx, const char *reason)
 {
-    printf("[DEBUG SUBMIT] type=%d (0:RS485, 1:RS232, 2:BD), len=%d, reason=%s\n",
-           state->data_type, state->frame_len, reason);
+    // printf("[DEBUG SUBMIT] type=%d (0:RS485, 1:RS232, 2:BD), len=%d, reason=%s\n",
+    //        state->data_type, state->frame_len, reason);
     if (state->frame_len <= 0)
     {
         return;

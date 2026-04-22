@@ -500,17 +500,14 @@ void *eg_monitor_thread(void *arg)
         sleep(1);
     }
     
+    // TCP 连接成功后，不再主动检测网络状态
+    // 因为 eg_is_network_available() 会发送 AT 命令，与数据发送产生冲突
+    // 网络状态由 main_send_thread 根据发送结果自行判断
     while (!stop_flag)
     {
-        int available = eg_is_network_available();
-        pthread_mutex_lock(&g_4g_mutex);
-        if (available != g_4g_available)
-        {
-            g_4g_available = available;
-            printf("[EG MONITOR] Network status changed to %s\n", available ? "AVAILABLE" : "UNAVAILABLE");
-        }
-        pthread_mutex_unlock(&g_4g_mutex);
-        sleep(30); // 每30秒检测一次
+        // 仅监控 PDP 去激活事件（由 receive_thread 通过 URC 检测）
+        // 不再主动发送 AT 命令检测网络
+        sleep(30);
     }
     return NULL;
 }
@@ -566,6 +563,11 @@ void *main_send_thread(void *arg)
     g_eg_init_done = 1;
     pthread_mutex_unlock(&g_eg_init_mutex);
 
+    // TCP 连接成功后，立即标记 4G 可用
+    pthread_mutex_lock(&g_4g_mutex);
+    g_4g_available = 1;
+    pthread_mutex_unlock(&g_4g_mutex);
+
     // ========== 2. 主循环：发送数据 ==========
     while (!stop_flag)
     {
@@ -607,7 +609,24 @@ void *main_send_thread(void *arg)
         int current_4g_avail = g_4g_available;
         pthread_mutex_unlock(&g_4g_mutex);
 
+        // 如果 4G 可用但未连接，尝试重新连接
+        if (current_4g_avail && !eg_connected)
+        {
+            printf("[MAIN] 4G available but not connected, trying to reconnect...\n");
+            if (eg_connect() == 0)
+            {
+                eg_connected = 1;
+                printf("[MAIN] 4G reconnected successfully\n");
+            }
+            else
+            {
+                printf("[MAIN] 4G reconnect failed, will retry later\n");
+            }
+        }
+
         use_4g = (current_4g_avail && eg_connected);
+        printf("[MAIN DEBUG] 4g_avail=%d, eg_connected=%d, use_4g=%d\n", 
+               current_4g_avail, eg_connected, use_4g);
 
         // 从文件打包数据
         if (pack_data_from_files(paths, offsets, 2, EG_MSG_LEN,

@@ -169,61 +169,109 @@ int eg_init(void)
 int eg_send_data(const unsigned char *data, int len)
 {
     char cmd[32];
-    snprintf(cmd, sizeof(cmd), "AT+QISEND=%d,%d\r\n", eg_connect_id, len);
-
-    
-    // 发送命令，等待 '>' 提示符
-    data_send((unsigned char *)cmd, strlen(cmd), EG_DEV);
-
+    char buf[256] = {0};
+    int total = 0;
     fd_set fds;
-    struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(eg_fd, &fds);
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
+    struct timeval tv, start, now;
 
-    int ret = select(eg_fd + 1, &fds, NULL, NULL, &tv);
-    if (ret <= 0)
+    // 清空接收缓冲区
+    tcflush(eg_fd, TCIFLUSH);
+
+    // 发送 AT+QISEND 命令
+    snprintf(cmd, sizeof(cmd), "AT+QISEND=%d,%d\r\n", eg_connect_id, len);
+    data_send((unsigned char *)cmd, strlen(cmd), EG_DEV);
+    printf("[EG] Sent: %s", cmd);
+
+    // 等待 '>' 提示符（最多 5 秒）
+    gettimeofday(&start, NULL);
+    while (1)
     {
-        printf("[EG] No '>' prompt for QISEND\n");
-        return -1;
+        gettimeofday(&now, NULL);
+        long elapsed = (now.tv_sec - start.tv_sec) * 1000 + 
+                       (now.tv_usec - start.tv_usec) / 1000;
+        if (elapsed >= 5000)
+        {
+            printf("[EG] No '>' prompt timeout\n");
+            return -1;
+        }
+
+        FD_ZERO(&fds);
+        FD_SET(eg_fd, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000;
+
+        int ret = select(eg_fd + 1, &fds, NULL, NULL, &tv);
+        if (ret <= 0) continue;
+
+        int n = data_recv(buf + total, sizeof(buf) - 1 - total, EG_DEV);
+        if (n > 0)
+        {
+            total += n;
+            buf[total] = '\0';
+            if (strstr(buf, ">"))
+            {
+                printf("[EG] Got '>' prompt\n");
+                break;
+            }
+            if (strstr(buf, "ERROR"))
+            {
+                printf("[EG] QISEND error: %s\n", buf);
+                return -1;
+            }
+        }
     }
 
-    char buf[16];
-    int n = data_recv(buf, sizeof(buf) - 1, EG_DEV);
-    if (n <= 0 || strstr(buf, ">") == NULL)
-    {
-        printf("[EG] Expected '>' not received\n");
-        return -1;
-    }
-
-    // 发送原始数据
+    // 发送原始数据（不加 Ctrl+Z，使用固定长度模式）
     data_send((unsigned char *)data, len, EG_DEV);
-    // 发送 Ctrl+Z (0x1A) 结束
-    unsigned char ctrl_z = 0x1A;
-    data_send(&ctrl_z, 1, EG_DEV);
+    printf("[EG] Sent %d bytes data\n", len);
 
-    // 等待 SEND OK
-    FD_ZERO(&fds);
-    FD_SET(eg_fd, &fds);
-    tv.tv_sec = 10;
-    tv.tv_usec = 0;
-    ret = select(eg_fd + 1, &fds, NULL, NULL, &tv);
-    if (ret <= 0)
+    // 等待 SEND OK（最多 15 秒，累积所有响应）
+    memset(buf, 0, sizeof(buf));
+    total = 0;
+    gettimeofday(&start, NULL);
+    while (1)
     {
-        printf("[EG] SEND OK timeout\n");
-        return -1;
-    }
+        gettimeofday(&now, NULL);
+        long elapsed = (now.tv_sec - start.tv_sec) * 1000 + 
+                       (now.tv_usec - start.tv_usec) / 1000;
+        if (elapsed >= 15000)
+        {
+            printf("[EG] SEND OK timeout, received so far: [%s]\n", buf);
+            // 即使超时，如果服务器收到了数据，也算成功
+            // 检查是否有部分成功的迹象
+            return -1;
+        }
 
-    n = data_recv(buf, sizeof(buf) - 1, EG_DEV);
-    if (n <= 0 || strstr(buf, "SEND OK") == NULL)
-    {
-        printf("[EG] Send failed: %s\n", buf);
-        return -1;
-    }
+        FD_ZERO(&fds);
+        FD_SET(eg_fd, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 500000;  // 500ms
 
-    printf("[EG] Sent %d bytes\n", len);
-    return 0;
+        int ret = select(eg_fd + 1, &fds, NULL, NULL, &tv);
+        if (ret <= 0) continue;
+
+        int n = data_recv(buf + total, sizeof(buf) - 1 - total, EG_DEV);
+        if (n > 0)
+        {
+            total += n;
+            buf[total] = '\0';
+            // 只打印非空响应
+            if (n > 0 && buf[total-n] != '\0') {
+                printf("[EG] Recv (%d bytes): [%s]\n", n, buf + total - n);
+            }
+            
+            if (strstr(buf, "SEND OK"))
+            {
+                printf("[EG] Data sent successfully (%d bytes)\n", len);
+                return 0;
+            }
+            if (strstr(buf, "ERROR") || strstr(buf, "SEND FAIL") || strstr(buf, "CLOSED"))
+            {
+                printf("[EG] Send failed: %s\n", buf);
+                return -1;
+            }
+        }
+    }
 }
 
 // 检查 4G 网络是否可用（信号正常 + 已注册）
@@ -274,16 +322,26 @@ int eg_is_network_available(void)
 }
 int eg_connect(void)
 {
-    const char *tcp_cmd = "AT+QIOPEN=1,0,\"TCP\",\"220.180.239.212\",8009,0,0\r\n";
+    const char *tcp_cmd = "AT+QIOPEN=1,0,\"TCP\",\"115.120.239.161\",28187,0,0\r\n";
     char buf[256];
+    char total_buf[512] = {0};
+    int total_len = 0;
 
+    // 先关闭可能存在的旧连接
+    data_send((unsigned char *)"AT+QICLOSE=0\r\n", 14, EG_DEV);
+    sleep(1);
+    tcflush(eg_fd, TCIFLUSH);
+
+    printf("[EG] Connecting to 115.120.239.161:28187...\n");
     data_send((unsigned char *)tcp_cmd, strlen(tcp_cmd), EG_DEV);
 
-    // 等待 +QIOPEN: 0,0 （最长 150 秒，可被 stop_flag 中断）
+    // 等待 +QIOPEN: 0,x （最长 60 秒，可被 stop_flag 中断）
+    // AT+QIOPEN 会先返回 OK，然后异步返回 +QIOPEN: <connectID>,<err>
+    // err=0 表示成功，其他值表示失败
     fd_set fds;
     struct timeval tv;
     int elapsed = 0;
-    const int timeout_sec = 150;
+    const int timeout_sec = 60;
 
     while (elapsed < timeout_sec && !stop_flag)
     {
@@ -296,19 +354,40 @@ int eg_connect(void)
         if (ret > 0)
         {
             int n = data_recv(buf, sizeof(buf) - 1, EG_DEV);
-            if (n <= 0)
-                return -1;
-            buf[n] = '\0';
+            if (n > 0)
+            {
+                buf[n] = '\0';
+                // 累积响应
+                if (total_len + n < (int)sizeof(total_buf) - 1) {
+                    memcpy(total_buf + total_len, buf, n);
+                    total_len += n;
+                    total_buf[total_len] = '\0';
+                }
+                printf("[EG] Recv: %s\n", buf);
 
-            if (strstr(buf, "+QIOPEN: 0,0") != NULL)
-            {
-                printf("[EG] TCP connected\n");
-                return 0;
-            }
-            else
-            {
-                printf("[EG] TCP connect failed: %s\n", buf);
-                return -1;
+                // 检查是否收到 +QIOPEN 响应
+                if (strstr(total_buf, "+QIOPEN: 0,0") != NULL)
+                {
+                    printf("[EG] TCP connected successfully\n");
+                    return 0;
+                }
+                // 检查连接失败（+QIOPEN: 0,非零错误码）
+                char *qiopen = strstr(total_buf, "+QIOPEN: 0,");
+                if (qiopen != NULL)
+                {
+                    int err_code = atoi(qiopen + 11);
+                    if (err_code != 0) {
+                        printf("[EG] TCP connect failed, error code: %d\n", err_code);
+                        return -1;
+                    }
+                }
+                // 检查 ERROR 响应
+                if (strstr(total_buf, "ERROR") != NULL)
+                {
+                    printf("[EG] TCP connect error\n");
+                    return -1;
+                }
+                // 收到 OK 只是命令确认，继续等待 +QIOPEN
             }
         }
         elapsed++;
@@ -320,7 +399,7 @@ int eg_connect(void)
         return -1;
     }
 
-    printf("[EG] TCP connect timeout\n");
+    printf("[EG] TCP connect timeout (no +QIOPEN response)\n");
     return -1;
 }
 
