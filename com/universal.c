@@ -190,15 +190,15 @@ static void submit_frame(serial_state_t *state, frame_processor_ctx_t *ctx, cons
 
     // 打印调试信息
     // printf("[%s COMPLETE %d bytes (%s)]: ", state->tag, state->frame_len, reason);
-    for (int i = 0; i < state->frame_len && i < 32; i++)
-    { // 限制打印长度
-        printf("%02X ", state->frame_buf[i]);
-    }
-    if (state->frame_len > 32)
-    {
-        printf("... (+%d more bytes)", state->frame_len - 32);
-    }
-    printf("\n");
+    // for (int i = 0; i < state->frame_len && i < 32; i++)
+    // { // 限制打印长度
+    //     printf("%02X ", state->frame_buf[i]);
+    // }
+    // if (state->frame_len > 32)
+    // {
+    //     printf("... (+%d more bytes)", state->frame_len - 32);
+    // }
+    // printf("\n");
 }
 
 // 初始化串口状态

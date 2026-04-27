@@ -3,6 +3,7 @@
 #include "../inc/watch_dog.h"
 #include "../inc/bluetooth.h"
 #include <sys/ioctl.h>
+#define DEBUG
 extern struct kfifo data_fifo;
 
 static pthread_mutex_t fifo_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -46,6 +47,322 @@ extern int bt_fd;
 extern int eg_fd;
 extern int watchdog_fd;
 extern loRa_Para_t my_lora_config;
+#ifdef DEBUG
+static volatile int g_debug_eg_connected = 0;
+static pthread_mutex_t g_debug_eg_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+#ifdef DEBUG
+
+#define DEBUG_BT_BD_INTERVAL_SEC 60
+#define DEBUG_BT_BD_QUEUE_DEPTH 8
+#define DEBUG_BT_MAX_RAW_LEN 128
+
+typedef struct
+{
+    uint8_t data[DEBUG_BT_MAX_RAW_LEN];
+    int len;
+} debug_bt_bd_item_t;
+
+static debug_bt_bd_item_t g_debug_bt_bd_queue[DEBUG_BT_BD_QUEUE_DEPTH];
+static int g_debug_bt_bd_head = 0;
+static int g_debug_bt_bd_tail = 0;
+static int g_debug_bt_bd_count = 0;
+static time_t g_debug_bt_last_bd_send_time = 0;
+static pthread_mutex_t g_debug_bt_bd_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int debug_is_hex_char(char c)
+{
+    return ((c >= '0' && c <= '9') ||
+            (c >= 'a' && c <= 'f') ||
+            (c >= 'A' && c <= 'F'));
+}
+
+static int debug_hex_char_to_val(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/*
+ * 手机发送纯16进制字符串：
+ * 0102030a0b0c -> 01 02 03 0A 0B 0C
+ * 支持中间带空格；不支持 0x 前缀。
+ */
+static int debug_parse_plain_hex(const char *str, uint8_t *out, int out_max)
+{
+    char clean[512];
+    int clean_len = 0;
+
+    if (str == NULL || out == NULL || out_max <= 0)
+        return -1;
+
+    for (int i = 0; str[i] != '\0' && clean_len < (int)sizeof(clean) - 1; i++)
+    {
+        char c = str[i];
+
+        if (c == ' ' || c == '\r' || c == '\n' || c == '\t')
+            continue;
+
+        if (!debug_is_hex_char(c))
+            return -1;
+
+        clean[clean_len++] = c;
+    }
+
+    clean[clean_len] = '\0';
+
+    if (clean_len == 0 || (clean_len % 2) != 0)
+        return -1;
+
+    int byte_len = clean_len / 2;
+    if (byte_len > out_max)
+        return -1;
+
+    for (int i = 0; i < byte_len; i++)
+    {
+        int high = debug_hex_char_to_val(clean[i * 2]);
+        int low = debug_hex_char_to_val(clean[i * 2 + 1]);
+
+        if (high < 0 || low < 0)
+            return -1;
+
+        out[i] = (uint8_t)((high << 4) | low);
+    }
+
+    return byte_len;
+}
+
+static void debug_dump_hex(const char *tag, const uint8_t *data, int len)
+{
+    printf("%s len=%d: ", tag, len);
+    for (int i = 0; i < len; i++)
+    {
+        printf("%02X ", data[i]);
+    }
+    printf("\n");
+}
+
+static int debug_bt_bd_enqueue(const uint8_t *data, int len)
+{
+    if (data == NULL || len <= 0)
+        return -1;
+
+    /*
+     * bd_send_packet() 会把原始数据转成十六进制字符串。
+     * BD_MSG_LEN 是十六进制最大长度，所以原始数据不能太长。
+     */
+    if ((len * 2) > (BD_MSG_LEN - 2))
+    {
+        printf("[DEBUG BT] BD payload too long: raw_len=%d\n", len);
+        return -2;
+    }
+
+    pthread_mutex_lock(&g_debug_bt_bd_mutex);
+
+    if (g_debug_bt_bd_count >= DEBUG_BT_BD_QUEUE_DEPTH)
+    {
+        pthread_mutex_unlock(&g_debug_bt_bd_mutex);
+        printf("[DEBUG BT] BD queue full\n");
+        return -3;
+    }
+
+    memcpy(g_debug_bt_bd_queue[g_debug_bt_bd_tail].data, data, len);
+    g_debug_bt_bd_queue[g_debug_bt_bd_tail].len = len;
+
+    g_debug_bt_bd_tail = (g_debug_bt_bd_tail + 1) % DEBUG_BT_BD_QUEUE_DEPTH;
+    g_debug_bt_bd_count++;
+
+    printf("[DEBUG BT] BD queued, count=%d\n", g_debug_bt_bd_count);
+
+    pthread_mutex_unlock(&g_debug_bt_bd_mutex);
+    return 0;
+}
+
+/*
+ * 每次只尝试发送队列头部一包。
+ * 严格遵守 60 秒间隔。
+ *
+ * 返回：
+ *  1 = 本次发送了一包
+ *  0 = 没到60秒，或者队列为空
+ * -1 = 发送失败
+ */
+static int debug_bt_bd_flush_once(void)
+{
+    uint8_t data[DEBUG_BT_MAX_RAW_LEN];
+    int len = 0;
+    time_t now = time(NULL);
+
+    pthread_mutex_lock(&g_debug_bt_bd_mutex);
+
+    if (g_debug_bt_bd_count <= 0)
+    {
+        pthread_mutex_unlock(&g_debug_bt_bd_mutex);
+        return 0;
+    }
+
+    if (g_debug_bt_last_bd_send_time != 0 &&
+        now - g_debug_bt_last_bd_send_time < DEBUG_BT_BD_INTERVAL_SEC)
+    {
+        long left = DEBUG_BT_BD_INTERVAL_SEC - (now - g_debug_bt_last_bd_send_time);
+        pthread_mutex_unlock(&g_debug_bt_bd_mutex);
+        printf("[DEBUG BT] BD interval not reached, %ld sec left\n", left);
+        return 0;
+    }
+
+    len = g_debug_bt_bd_queue[g_debug_bt_bd_head].len;
+    memcpy(data, g_debug_bt_bd_queue[g_debug_bt_bd_head].data, len);
+
+    g_debug_bt_bd_head = (g_debug_bt_bd_head + 1) % DEBUG_BT_BD_QUEUE_DEPTH;
+    g_debug_bt_bd_count--;
+
+    /*
+     * 无论本次 bd_send_packet 成功还是失败，都更新 last time。
+     * 这样可以保证测试通道不会在北斗异常时疯狂重发。
+     */
+    g_debug_bt_last_bd_send_time = now;
+
+    pthread_mutex_unlock(&g_debug_bt_bd_mutex);
+
+    printf("[DEBUG BT] BD send now, len=%d\n", len);
+    if (bd_send_packet(data, len) == 0)
+    {
+        printf("[DEBUG BT] BD send ok\n");
+        return 1;
+    }
+
+    printf("[DEBUG BT] BD send failed\n");
+    return -1;
+}
+
+static int debug_bt_send_4g_now(const uint8_t *data, int len)
+{
+    int connected = 0;
+
+    if (data == NULL || len <= 0)
+        return -1;
+
+    pthread_mutex_lock(&g_debug_eg_mutex);
+    connected = g_debug_eg_connected;
+    pthread_mutex_unlock(&g_debug_eg_mutex);
+
+    if (!connected)
+    {
+        printf("[DEBUG BT] 4G not connected, skip\n");
+        return -2;
+    }
+
+    if (eg_send_data((unsigned char *)data, len) == 0)
+    {
+        printf("[DEBUG BT] 4G send ok, len=%d\n", len);
+        return 0;
+    }
+
+    printf("[DEBUG BT] 4G send failed\n");
+    return -1;
+}
+
+static int debug_bt_send_lora_by_rule(const uint8_t *data, int len)
+{
+    loRa_Para_t cfg;
+
+    lora_cfg_get(&cfg);
+
+    if (cfg.mesh_type != LORA_MESH_NODE)
+    {
+        printf("[DEBUG BT] LoRa skip: not node, mesh=0x%02X\n", cfg.mesh_type);
+        return -2;
+    }
+
+    if (cfg.is_root == LORA_MESH_ROOT)
+    {
+        printf("[DEBUG BT] LoRa skip: root node\n");
+        return -3;
+    }
+
+    if (len > cfg.payload_size)
+    {
+        printf("[DEBUG BT] LoRa payload too long: len=%d max=%u\n",
+               len, cfg.payload_size);
+        return -4;
+    }
+
+    Lora_send_packet(cfg.net_id, cfg.dev_id, (uint8_t *)data, len);
+
+    printf("[DEBUG BT] LoRa send ok, net=0x%02X dev=0x%02X len=%d\n",
+           cfg.net_id, cfg.dev_id, len);
+
+    return 0;
+}
+
+/*
+ * 返回：
+ * 1 = 已经作为 DEBUG 纯16进制数据处理
+ * 0 = 不是 DEBUG 数据，继续走原来的 bt_handle_simple_command()
+ */
+static int debug_bt_handle_hex_payload_line(const char *line)
+{
+    uint8_t payload[DEBUG_BT_MAX_RAW_LEN];
+    int payload_len;
+    int bd_queue_ret;
+    int bd_flush_ret;
+    int eg_ret;
+    int lora_ret;
+    char ack[128];
+
+    if (line == NULL || line[0] == '\0')
+        return 0;
+
+    /*
+     * 保留原来的 LL_ 控制命令：
+     * LL_0x00 / LL_0x01 / LL_0x02 / LL_0x03 / LL_0x04 / LL_0x0a
+     * 以及你后面加的 LoRa 配置命令。
+     */
+    if (strncmp(line, "LL_", 3) == 0)
+        return 0;
+
+    payload_len = debug_parse_plain_hex(line, payload, sizeof(payload));
+    if (payload_len <= 0)
+    {
+        printf("[DEBUG BT] invalid pure hex payload: %s\n", line);
+        bt_send_text("LL_DEBUG_DATA_ERR\r\n");
+        return 1;
+    }
+
+    debug_dump_hex("[DEBUG BT RX]", payload, payload_len);
+
+    /*
+     * 北斗：只入队，由 debug_bt_bd_flush_once() 按60秒间隔发送。
+     */
+    bd_queue_ret = debug_bt_bd_enqueue(payload, payload_len);
+    bd_flush_ret = debug_bt_bd_flush_once();
+
+    /*
+     * 4G：测试直发。
+     * 注意：这是 DEBUG 测试通道，如果 main_send_thread 正在发送4G，
+     * 可能会与原来的4G发送逻辑抢 AT 通道。
+     */
+    eg_ret = debug_bt_send_4g_now(payload, payload_len);
+
+    /*
+     * LoRa：遵守原来的根节点/非根节点规则。
+     */
+    lora_ret = debug_bt_send_lora_by_rule(payload, payload_len);
+
+    snprintf(ack, sizeof(ack),
+             "LL_DEBUG_ACK,BD_Q=%d,BD_FLUSH=%d,4G=%d,LORA=%d\r\n",
+             bd_queue_ret, bd_flush_ret, eg_ret, lora_ret);
+    bt_send_text(ack);
+
+    return 1;
+}
+
+#endif
 
 /**
  * @brief 从 RTC 设备读取当前时间
@@ -536,7 +853,9 @@ void *bt_comm_thread(void *arg)
             heartbeat++;
             last_heartbeat = now;
         }
-
+#ifdef DEBUG
+        debug_bt_bd_flush_once();
+#endif
         FD_ZERO(&fds);
         FD_SET(bt_fd, &fds);
         tv.tv_sec = 0;
@@ -555,7 +874,12 @@ void *bt_comm_thread(void *arg)
                 while (end != NULL)
                 {
                     *end = '\0';
-                    bt_handle_simple_command(recv_buf);
+#ifdef DEBUG
+                    if (!debug_bt_handle_hex_payload_line(recv_buf))
+#endif
+                    {
+                        bt_handle_simple_command(recv_buf);
+                    }
 
                     int consumed = (end - recv_buf) + 2;
                     int remaining = recv_len - consumed;
@@ -827,7 +1151,11 @@ void *main_send_thread(void *arg)
 
         // 更新蓝牙状态
         bt_update_status(eg_connected, 99, g_send_count_4g, g_send_count_bd, g_send_fail_count);
-
+#ifdef DEBUG
+        pthread_mutex_lock(&g_debug_eg_mutex);
+        g_debug_eg_connected = (current_4g_avail && eg_connected);
+        pthread_mutex_unlock(&g_debug_eg_mutex);
+#endif
         printf("[MAIN] path=%d, 4g_avail=%d, eg_connected=%d\n",
                send_path, current_4g_avail, eg_connected);
 
