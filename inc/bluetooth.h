@@ -1,7 +1,7 @@
 /**
  * @file bluetooth.h
  * @brief 蓝牙模块接口定义
- * 
+ *
  * 功能：
  * 1. 作为从设备与手机APP通信
  * 2. 发送DTU心跳、4G网络状态、蓝牙连接状态
@@ -14,41 +14,43 @@
 #include <stdint.h>
 
 // ============== 发送路径定义 ==============
-typedef enum {
-    SEND_PATH_AUTO = 0,    // 自动选择（优先4G，失败切北斗）
-    SEND_PATH_4G_ONLY,     // 仅4G
-    SEND_PATH_BD_ONLY,     // 仅北斗
-    SEND_PATH_4G_FIRST,    // 4G优先
-    SEND_PATH_BD_FIRST     // 北斗优先
+typedef enum
+{
+    SEND_PATH_AUTO = 0, // 自动选择（优先4G，失败切北斗）
+    SEND_PATH_4G_ONLY,  // 仅4G
+    SEND_PATH_BD_ONLY,  // 仅北斗
+    SEND_PATH_4G_FIRST, // 4G优先
+    SEND_PATH_BD_FIRST  // 北斗优先
 } send_path_t;
 
 // ============== 蓝牙命令定义 ==============
 // 手机APP发送的命令格式: $CMD,<cmd_id>,<param>*<checksum>\r\n
-#define BT_CMD_SET_PATH     0x01    // 设置发送路径
-#define BT_CMD_GET_STATUS   0x02    // 获取设备状态
-#define BT_CMD_REBOOT       0x03    // 重启设备
-#define BT_CMD_GET_CONFIG   0x04    // 获取配置
+#define BT_CMD_SET_PATH 0x01   // 设置发送路径
+#define BT_CMD_GET_STATUS 0x02 // 获取设备状态
+#define BT_CMD_REBOOT 0x03     // 重启设备
+#define BT_CMD_GET_CONFIG 0x04 // 获取配置
 
 // ============== 蓝牙响应定义 ==============
 // DTU发送的响应格式: $RSP,<cmd_id>,<result>,<data>*<checksum>\r\n
-#define BT_RSP_OK           0x00    // 成功
-#define BT_RSP_ERR          0x01    // 失败
-#define BT_RSP_INVALID      0x02    // 无效命令
+#define BT_RSP_OK 0x00      // 成功
+#define BT_RSP_ERR 0x01     // 失败
+#define BT_RSP_INVALID 0x02 // 无效命令
 
 // ============== 心跳包定义 ==============
 // 心跳格式: $HB,<4g_status>,<bt_status>,<send_path>,<uptime>*<checksum>\r\n
-#define BT_HEARTBEAT_INTERVAL   5   // 心跳间隔（秒）
+#define BT_HEARTBEAT_INTERVAL 5 // 心跳间隔（秒）
 
 // ============== 状态结构体 ==============
-typedef struct {
-    uint8_t eg_connected;       // 4G连接状态: 0=断开, 1=已连接
-    uint8_t eg_signal;          // 4G信号强度 (0-31, 99=未知)
-    uint8_t bt_connected;       // 蓝牙连接状态: 0=断开, 1=已连接
-    uint8_t send_path;          // 当前发送路径
-    uint32_t uptime;            // 运行时间（秒）
-    uint32_t send_count_4g;     // 4G发送计数
-    uint32_t send_count_bd;     // 北斗发送计数
-    uint32_t send_fail_count;   // 发送失败计数
+typedef struct
+{
+    uint8_t eg_connected;     // 4G连接状态: 0=断开, 1=已连接
+    uint8_t eg_signal;        // 4G信号强度 (0-31, 99=未知)
+    uint8_t bt_connected;     // 蓝牙连接状态: 0=断开, 1=已连接
+    uint8_t send_path;        // 当前发送路径
+    uint32_t uptime;          // 运行时间（秒）
+    uint32_t send_count_4g;   // 4G发送计数
+    uint32_t send_count_bd;   // 北斗发送计数
+    uint32_t send_fail_count; // 发送失败计数
 } dtu_status_t;
 
 // ============== 函数声明 ==============
@@ -128,5 +130,11 @@ void *bt_comm_thread(void *arg);
 void bt_update_status(uint8_t eg_connected, uint8_t eg_signal,
                       uint32_t send_count_4g, uint32_t send_count_bd,
                       uint32_t send_fail_count);
-
+send_path_t bt_get_send_path(void);
+void bt_set_send_path(send_path_t path);
+void bt_update_status(uint8_t eg_connected, uint8_t eg_signal,
+                      uint32_t send_count_4g, uint32_t send_count_bd,
+                      uint32_t send_fail_count);
+int bt_send_heartbeat_simple(uint8_t hb);
+void bt_handle_simple_command(const char *cmd);
 #endif /* __BLUETOOTH_H__ */

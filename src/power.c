@@ -23,18 +23,21 @@
 #include <stdatomic.h>
 #include <gpiod.h>
 #include "../inc/power.h"
-#include "../inc/rtc.h"
 #include "../inc/usart.h"
 #include "../inc/universal.h"
 #include "../inc/eg800k.h"
 #include "../inc/bluetooth.h"
 #include "../inc/gpio.h"
+#include "../app/thread_summary.h"
 
 // ============== 外部变量 ==============
-extern atomic_int stop_flag;
+extern volatile sig_atomic_t stop_flag;
 extern struct gpiod_line *line_4g_pow;
 extern struct gpiod_line *line_4g_sleep;
+extern struct gpiod_line *line_4g_boot;
 extern struct gpiod_line *line_bt_pow;
+extern struct gpiod_line *line_bd_en;
+extern struct gpiod_line *line_bd_pow;
 extern int eg_fd;
 extern int bt_fd;
 
@@ -132,42 +135,42 @@ int power_init(const power_config_t *config)
     return 0;
 }
 
-int power_set_rtc_wakeup(int seconds)
-{
-    // 方法1: 使用 RX8010SJ 定时器
-    if (rx8010_set_timer_wakeup(seconds) == 0) {
-        printf("[POWER] RTC wakeup set via RX8010SJ: %d seconds\n", seconds);
-        return 0;
-    }
+// int power_set_rtc_wakeup(int seconds)
+// {
+//     // 方法1: 使用 RX8010SJ 定时器
+//     if (rx8010_set_timer_wakeup(seconds) == 0) {
+//         printf("[POWER] RTC wakeup set via RX8010SJ: %d seconds\n", seconds);
+//         return 0;
+//     }
     
-    // 方法2: 使用 /sys/class/rtc/rtc0/wakealarm
-    char cmd[64];
-    time_t now = time(NULL);
-    time_t wakeup_time = now + seconds;
+//     // 方法2: 使用 /sys/class/rtc/rtc0/wakealarm
+//     char cmd[64];
+//     time_t now = time(NULL);
+//     time_t wakeup_time = now + seconds;
     
-    // 先清除旧的 wakealarm
-    write_sysfs("/sys/class/rtc/rtc0/wakealarm", "0");
+//     // 先清除旧的 wakealarm
+//     write_sysfs("/sys/class/rtc/rtc0/wakealarm", "0");
     
-    // 设置新的 wakealarm (Unix 时间戳)
-    snprintf(cmd, sizeof(cmd), "%ld", wakeup_time);
-    if (write_sysfs("/sys/class/rtc/rtc0/wakealarm", cmd) == 0) {
-        printf("[POWER] RTC wakeup set via sysfs: %d seconds\n", seconds);
-        return 0;
-    }
+//     // 设置新的 wakealarm (Unix 时间戳)
+//     snprintf(cmd, sizeof(cmd), "%ld", wakeup_time);
+//     if (write_sysfs("/sys/class/rtc/rtc0/wakealarm", cmd) == 0) {
+//         printf("[POWER] RTC wakeup set via sysfs: %d seconds\n", seconds);
+//         return 0;
+//     }
     
-    // 方法3: 使用 rtcwake 命令 (备用)
-    // snprintf(cmd, sizeof(cmd), "rtcwake -m no -s %d", seconds);
-    // system(cmd);
+//     // 方法3: 使用 rtcwake 命令 (备用)
+//     // snprintf(cmd, sizeof(cmd), "rtcwake -m no -s %d", seconds);
+//     // system(cmd);
     
-    printf("[POWER] Failed to set RTC wakeup\n");
-    return -1;
-}
+//     printf("[POWER] Failed to set RTC wakeup\n");
+//     return -1;
+// }
 
-void power_clear_rtc_wakeup(void)
-{
-    rx8010_disable_irq();
-    write_sysfs("/sys/class/rtc/rtc0/wakealarm", "0");
-}
+// void power_clear_rtc_wakeup(void)
+// {
+//     rx8010_disable_irq();
+//     write_sysfs("/sys/class/rtc/rtc0/wakealarm", "0");
+// }
 
 void power_4g_control(int enable)
 {
@@ -194,6 +197,72 @@ void power_bt_control(int enable)
     }
 }
 
+void power_bd_control(int enable)
+{
+    if (enable) {
+        // 开启北斗模块电源
+        if (line_bd_pow) {
+            gpio_set_value(1, line_bd_pow);
+        }
+        if (line_bd_en) {
+            gpio_set_value(1, line_bd_en);
+        }
+        printf("[POWER] BeiDou module enabled\n");
+    } else {
+        // 关闭北斗模块电源
+        if (line_bd_en) {
+            gpio_set_value(0, line_bd_en);
+        }
+        if (line_bd_pow) {
+            gpio_set_value(0, line_bd_pow);
+        }
+        printf("[POWER] BeiDou module disabled\n");
+    }
+}
+
+int power_comm_modules_on(void)
+{
+    printf("[POWER] Powering on communication modules...\n");
+    
+    // 1. 开启4G模块电源
+    if (line_4g_pow) {
+        gpio_set_value(1, line_4g_pow);
+    }
+    if (line_4g_boot) {
+        gpio_set_value(0, line_4g_boot);
+        usleep(100000);  // 100ms
+        gpio_set_value(1, line_4g_boot);
+    }
+    power_4g_control(1);  // 唤醒4G模块
+    
+    // 2. 开启北斗模块电源
+    power_bd_control(1);
+    
+    // 3. 等待模块启动稳定
+    printf("[POWER] Waiting for modules to stabilize...\n");
+    sleep(3);  // 等待3秒让模块稳定
+    
+    printf("[POWER] Communication modules powered on\n");
+    return 0;
+}
+
+void power_comm_modules_off(void)
+{
+    printf("[POWER] Powering off communication modules...\n");
+    
+    // 1. 关闭4G模块
+    power_4g_control(0);  // 先让4G进入休眠
+    usleep(100000);
+    if (line_4g_pow) {
+        gpio_set_value(0, line_4g_pow);
+    }
+    
+    // 2. 关闭北斗模块
+    power_bd_control(0);
+    
+    printf("[POWER] Communication modules powered off\n");
+}
+
 int power_prepare_suspend(void)
 {
     printf("[POWER] Preparing for suspend...\n");
@@ -201,10 +270,10 @@ int power_prepare_suspend(void)
     // 1. 保存偏移量
     save_offsets(OFFSET_FILE_POWER, log_offsets, 2);
     
-    // 2. 让 4G 模块进入休眠
+    // 2. 确保通信模块已关闭（正常情况下应该已经关闭）
+    // 这里只是做双重保险
     if (g_power_config.enable_4g_sleep) {
         power_4g_control(0);
-        usleep(100000);  // 等待 100ms
     }
     
     // 3. 关闭蓝牙
@@ -223,19 +292,16 @@ int power_resume(void)
 {
     printf("[POWER] Resuming from suspend...\n");
     
-    // 1. 唤醒 4G 模块
-    if (g_power_config.enable_4g_sleep) {
-        power_4g_control(1);
-        usleep(500000);  // 等待 500ms 让模块稳定
-    }
-    
-    // 3. 开启蓝牙
+    // 1. 开启蓝牙（如果需要）
     if (g_power_config.enable_bt_sleep) {
         power_bt_control(1);
     }
     
-    // 4. 清除 RTC 中断标志
-    rx8010_clear_irq();
+    // 2. 清除 RTC 中断标志
+    // rx8010_clear_irq();
+    
+    // 注意：通信模块（4G和北斗）不在这里开启
+    // 只有在有数据需要发送时才会在 power_do_send_cycle 中开启
     
     g_power_status.wakeup_count++;
     printf("[POWER] Resume complete (wakeup #%u)\n", g_power_status.wakeup_count);
@@ -329,7 +395,8 @@ wakeup_source_t power_suspend(int wakeup_seconds)
             
             if (ret != 0) {
                 printf("[POWER] All suspend modes failed, using sleep fallback\n");
-                sleep(wakeup_seconds);
+                // 使用可中断的 sleep
+                interruptible_sleep(wakeup_seconds);
             }
         }
     }
@@ -371,6 +438,7 @@ int power_do_send_cycle(void)
     char hex_buf[256];
     int hex_len, entry_count;
     static int eg_connected = 0;  // 记录连接状态
+    static int eg_initialized = 0;  // 记录4G模块是否已初始化
     
     // 打包数据
     if (pack_data_from_files(log_paths, log_offsets, 2, 200,
@@ -392,6 +460,21 @@ int power_do_send_cycle(void)
     
     printf("[POWER] Sending %d bytes...\n", raw_len);
     
+    // ========== 有数据要发送，先打开通信模块电源 ==========
+    printf("[POWER] Data ready, powering on communication modules...\n");
+    power_comm_modules_on();
+    
+    // 如果4G模块未初始化，先初始化
+    if (!eg_initialized) {
+        printf("[POWER] Initializing 4G module...\n");
+        if (eg_init() == 0) {
+            eg_initialized = 1;
+            printf("[POWER] 4G module initialized\n");
+        } else {
+            printf("[POWER] 4G module init failed\n");
+        }
+    }
+    
     // 获取发送路径
     send_path_t path = bt_get_send_path();
     int send_ok = 0;
@@ -399,7 +482,7 @@ int power_do_send_cycle(void)
     // 根据路径发送
     if (path == SEND_PATH_4G_ONLY || path == SEND_PATH_4G_FIRST || path == SEND_PATH_AUTO) {
         // 如果未连接，先尝试连接
-        if (!eg_connected) {
+        if (!eg_connected && eg_initialized) {
             printf("[POWER] TCP not connected, trying to connect...\n");
             if (eg_connect() == 0) {
                 eg_connected = 1;
@@ -437,6 +520,18 @@ int power_do_send_cycle(void)
         }
     }
     
+    // ========== 发送完成后关闭通信模块电源 ==========
+    printf("[POWER] Send cycle complete, powering off communication modules...\n");
+    
+    // 关闭TCP连接
+    if (eg_connected) {
+        eg_send_cmd("AT+QICLOSE=0\r\n", "OK", 5);
+        eg_connected = 0;
+    }
+    eg_initialized = 0;  // 下次需要重新初始化
+    
+    power_comm_modules_off();
+    
     if (send_ok) {
         save_offsets(OFFSET_FILE_POWER, log_offsets, 2);
         return 0;
@@ -469,23 +564,25 @@ void *power_manager_thread(void *arg)
     // 初始化
     power_init(NULL);
     
+    // 初始状态：关闭通信模块电源（省电）
+    printf("[POWER] Initial state: powering off communication modules...\n");
+    power_comm_modules_off();
+    
     // 等待其他模块初始化完成
-    sleep(5);
+    interruptible_sleep(2);
     
     while (!stop_flag) {
         // 1. 检查是否有待发送数据
         if (power_check_pending_data()) {
-            printf("[POWER] Data pending, sending before sleep...\n");
+            printf("[POWER] Data pending, starting send cycle...\n");
             
-            // 确保 4G 模块已唤醒
-            power_4g_control(1);
-            usleep(500000);
-            
-            // 发送数据
+            // power_do_send_cycle 内部会自动开关电源
             power_do_send_cycle();
+        } else {
+            printf("[POWER] No pending data, modules remain off\n");
         }
         
-        // 2. 进入休眠
+        // 2. 进入休眠（通信模块已关闭）
         if (!stop_flag) {
             printf("[POWER] Entering low power mode for %d seconds...\n", 
                    g_power_config.wakeup_interval);
@@ -495,16 +592,10 @@ void *power_manager_thread(void *arg)
             printf("[POWER] Woke up from %s\n", 
                    source == WAKEUP_SOURCE_RTC ? "RTC" : "other source");
         }
-        
-        // 3. 唤醒后再次检查数据
-        if (!stop_flag && power_check_pending_data()) {
-            printf("[POWER] New data after wakeup, sending...\n");
-            power_do_send_cycle();
-        }
     }
     
     // 清理
-    power_clear_rtc_wakeup();
+    // power_clear_rtc_wakeup();
     save_offsets(OFFSET_FILE_POWER, log_offsets, 2);
     
     printf("[POWER] Power manager thread stopped\n");

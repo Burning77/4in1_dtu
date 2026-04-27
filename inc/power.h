@@ -82,12 +82,12 @@ int power_resume(void);
  * @param seconds 唤醒时间 (秒)
  * @return 0=成功, -1=失败
  */
-int power_set_rtc_wakeup(int seconds);
+// int power_set_rtc_wakeup(int seconds);
 
 /**
  * @brief 清除 RTC 唤醒定时器
  */
-void power_clear_rtc_wakeup(void);
+// void power_clear_rtc_wakeup(void);
 
 /**
  * @brief 控制 4G 模块电源/休眠
@@ -100,6 +100,23 @@ void power_4g_control(int enable);
  * @param enable 1=开启, 0=关闭
  */
 void power_bt_control(int enable);
+
+/**
+ * @brief 控制北斗模块电源
+ * @param enable 1=开启, 0=关闭
+ */
+void power_bd_control(int enable);
+
+/**
+ * @brief 打开所有通信模块电源（4G和北斗）
+ * @return 0=成功, -1=失败
+ */
+int power_comm_modules_on(void);
+
+/**
+ * @brief 关闭所有通信模块电源（4G和北斗）
+ */
+void power_comm_modules_off(void);
 
 /**
  * @brief 获取低功耗状态

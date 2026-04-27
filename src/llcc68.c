@@ -6,10 +6,11 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <gpiod.h>
-
+#include <pthread.h>
 #define FREQ_STEP 0.953674
+#define MAX_FRAME_SIZE 256
 // 全局句柄
-static int spi_fd = -1;
+int spi_fd = -1;
 static struct gpiod_chip *gpio_chip = NULL;
 static struct gpiod_line *line_nss = NULL;
 static struct gpiod_line *line_reset = NULL;
@@ -17,7 +18,11 @@ static struct gpiod_line *line_busy = NULL;
 static struct gpiod_line *line_dio1 = NULL;
 static uint8_t regModeParam = 0x01; // 0: LDO, 1: DC-DC
 static loRa_Para_t *lora_para_pt;
-
+static uint8_t last_frame[MAX_FRAME_SIZE];
+static int last_len = 0;
+static uint8_t tx_buf[260];
+static uint8_t rx_buf[260];
+static pthread_mutex_t g_lora_lock = PTHREAD_MUTEX_INITIALIZER;
 int hw_init(void)
 {
 	// 1. 初始化 SPI
@@ -426,42 +431,25 @@ void GetRxBufferStatus(uint8_t *payload_len, uint8_t *buf_pointer)
 }
 void ReadBuffer(uint8_t offset, uint8_t *data, uint8_t length)
 {
-	uint8_t *tx_buf; // 发送缓冲区指针
-	uint8_t *rx_buf; // 接收缓冲区指针
-	uint8_t i;
-	// 1. 检查参数有效性
-	if (length < 1)
-	{
-		return;
-	}
-	CheckBusy();
-	uint32_t total_len = 3 + length;
-	tx_buf = malloc(total_len);
-	rx_buf = malloc(total_len);
-	if (!tx_buf || !rx_buf)
-	{
-		// 内存分配失败处理
-		if (tx_buf)
-			free(tx_buf);
-		if (rx_buf)
-			free(rx_buf);
-		return;
-	}
+    if (data == NULL || length < 1)
+        return;
 
-	tx_buf[0] = 0x1E;	// ReadBuffer 命令码
-	tx_buf[1] = offset; // 偏移量
-	tx_buf[2] = 0xFF;
-	for (i = 3; i < total_len; i++)
-	{
-		tx_buf[i] = 0xFF;
-	}
-	spi_transfer(tx_buf, rx_buf, total_len);
-	for (i = 0; i < length; i++)
-	{
-		data[i] = rx_buf[3 + i];
-	}
-	free(tx_buf);
-	free(rx_buf);
+    if ((3 + length) > sizeof(tx_buf) || (3 + length) > sizeof(rx_buf))
+        return;
+
+    CheckBusy();
+
+    uint32_t total_len = 3 + length;
+
+    tx_buf[0] = 0x1E;
+    tx_buf[1] = offset;
+    tx_buf[2] = 0xFF;
+    memset(&tx_buf[3], 0xFF, length);
+    memset(rx_buf, 0, total_len);
+
+    spi_transfer(tx_buf, rx_buf, total_len);
+
+    memcpy(data, &rx_buf[3], length);
 }
 void ClearIrqStatus(uint16_t irq)
 {
@@ -485,7 +473,13 @@ uint8_t WaitForIRQ_RxDone(void)
 		if ((Irq_Status & 0x02) == RxDone_IRQ)
 		{
 			GetRxBufferStatus(&packet_size, &buf_offset);
-			ReadBuffer(buf_offset, rxbuf_pt, packet_size + 1);
+			if (packet_size == 0 || packet_size > lora_para_pt->payload_size)
+			{
+				ClearIrqStatus(RxDone_IRQ);
+				RxInit();
+				return 0;
+			}
+			ReadBuffer(buf_offset, rxbuf_pt, packet_size);
 			*rxcnt_pt = packet_size;
 			ClearIrqStatus(RxDone_IRQ); // Clear the IRQ RxDone flag
 			RxInit();
@@ -500,10 +494,10 @@ uint8_t WaitForIRQ_TxDone(void)
 	uint8_t time_out;
 
 	time_out = 0;
-	while (!gpiod_line_get_value(line_dio1))
+	if (gpiod_line_get_value(line_dio1))
 	{
 		time_out++;
-		usleep(10 * 1000);		// 10 ms
+		usleep(10 * 1000);	// 10 ms
 		if (time_out > 200) // if timeout , reset the the chip
 		{
 			ClearIrqStatus(TxDone_IRQ); // Clear the IRQ TxDone flag
@@ -534,6 +528,7 @@ void WriteBuffer(uint8_t offset, uint8_t *data, uint8_t length)
 }
 void Lora_send(uint8_t *payload, uint8_t size)
 {
+	pthread_mutex_lock(&g_lora_lock);
 	SetStandby(0);				// 0:STDBY_RC; 1:STDBY_Xosc
 	SetBufferBaseAddress(0, 0); //(TX_base_addr,RX_base_addr)
 
@@ -545,7 +540,7 @@ void Lora_send(uint8_t *payload, uint8_t size)
 	SetTx(0); // timeout = 0
 
 	// Wait for the IRQ TxDone or Timeout (implement in another function)
-	printf("Sending data: %s\n", payload);
+	// printf("Sending data: %s\n", payload);
 	// 7. 等待发送完成中断
 	if (WaitForIRQ_TxDone())
 	{
@@ -555,8 +550,53 @@ void Lora_send(uint8_t *payload, uint8_t size)
 	{
 		printf("Data send failed or timeout.\n");
 	}
+	RxInit(); // 发完恢复接收
+	pthread_mutex_unlock(&g_lora_lock);
 }
+int lora_unpack(uint8_t *buf, int len,
+				uint8_t expect_netid,
+				uint8_t expect_devid,
+				uint8_t *out_payload,
+				int *out_len)
+{
+	if (len < 4)
+		return -1; // 至少 NETID+DEVID+CRC
 
+	// 1. CRC校验
+	uint16_t recv_crc = buf[len - 2] | (buf[len - 1] << 8);
+	uint16_t calc_crc = crc16(buf, len - 2);
+
+	if (recv_crc != calc_crc)
+	{
+		printf("[LORA] CRC error\n");
+		return -2;
+	}
+
+	// 2. NETID / DEVID 校验
+	if (buf[0] != expect_netid || buf[1] != expect_devid)
+	{
+		printf("[LORA] ID mismatch\n");
+		return -3;
+	}
+
+	// 3. 去重（完全一样才丢）
+	if (len == last_len && memcmp(buf, last_frame, len) == 0)
+	{
+		printf("[LORA] Duplicate packet dropped\n");
+		return -4;
+	}
+
+	// 保存为最新帧
+	memcpy(last_frame, buf, len);
+	last_len = len;
+
+	// 4. 提取payload
+	int payload_len = len - 4;
+	memcpy(out_payload, &buf[2], payload_len);
+	*out_len = payload_len;
+
+	return 0;
+}
 void Lora_receive(uint8_t *payload, uint8_t size)
 {
 	rxbuf_pt = payload;
@@ -565,13 +605,94 @@ void Lora_receive(uint8_t *payload, uint8_t size)
 	SetDioIrqParams(RxDone_IRQ);
 	SetRx(0);
 	if (WaitForIRQ_RxDone())
-	{ // 此函数内部检查DIO1，并处理接收数据
-		printf("Received %u bytes: ", size);
-		for (int i = 0; i < size; i++)
+	{
+		uint8_t payload[256];
+		int payload_len;
+
+		int ret = lora_unpack(rxbuf_pt, *rxcnt_pt,
+							  0x01, 0x02, // 你的NETID/DEVID
+							  payload, &payload_len);
+
+		if (ret == 0)
 		{
-			printf("%c", payload[i]);
+			printf("[LORA] Valid packet (%d bytes): ", payload_len);
+			for (int i = 0; i < payload_len; i++)
+				printf("%02X ", payload[i]);
+			printf("\n");
 		}
-		printf("\n");
-		// 接收成功后，驱动内的 `WaitForIRQ_RxDone` 会重新调用 RxInit() 准备下一次接收
 	}
+}
+int lora_pack(uint8_t netid, uint8_t devid,
+			  uint8_t *payload, uint8_t payload_len,
+			  uint8_t *out_buf)
+{
+	int len = 0;
+
+	out_buf[len++] = netid;
+	out_buf[len++] = devid;
+
+	memcpy(&out_buf[len], payload, payload_len);
+	len += payload_len;
+
+	uint16_t crc = crc16(out_buf, len);
+
+	out_buf[len++] = crc & 0xFF;		// 低字节
+	out_buf[len++] = (crc >> 8) & 0xFF; // 高字节
+
+	return len;
+}
+void Lora_send_packet(uint8_t netid, uint8_t devid,
+					  uint8_t *payload, uint8_t size)
+{
+	uint8_t buf[256];
+	int len = lora_pack(netid, devid, payload, size, buf);
+
+	Lora_send(buf, len);
+}
+
+int Lora_recv_packet(uint8_t *payload, uint8_t *out_len)
+{
+	uint16_t irq_status;
+	uint8_t packet_size = 0;
+	uint8_t buf_offset = 0;
+
+	if (payload == NULL || out_len == NULL)
+		return -1;
+
+	pthread_mutex_lock(&g_lora_lock);
+
+	// 没有中断，表示暂时没有收到数据
+	if (!gpiod_line_get_value(line_dio1))
+	{
+		pthread_mutex_unlock(&g_lora_lock);
+		return 0;
+	}
+
+	irq_status = GetIrqStatus();
+
+	if ((irq_status & RxDone_IRQ) != RxDone_IRQ)
+	{
+		ClearIrqStatus(irq_status);
+		pthread_mutex_unlock(&g_lora_lock);
+		return 0;
+	}
+
+	GetRxBufferStatus(&packet_size, &buf_offset);
+
+	if (packet_size == 0 || packet_size > lora_para_pt->payload_size)
+	{
+		ClearIrqStatus(RxDone_IRQ);
+		RxInit();
+		pthread_mutex_unlock(&g_lora_lock);
+		return -2;
+	}
+
+	ReadBuffer(buf_offset, payload, packet_size);
+	*out_len = packet_size;
+
+	ClearIrqStatus(RxDone_IRQ);
+	RxInit(); // 收完立刻回到接收态
+
+	pthread_mutex_unlock(&g_lora_lock);
+	return 1;
 }
