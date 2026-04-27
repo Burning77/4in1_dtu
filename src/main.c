@@ -18,7 +18,7 @@ extern int eg_fd;
 extern int watchdog_fd;
 extern int spi_fd;
 loRa_Para_t my_lora_config = {
-    .is_root = LORA_MESH_ROOT,   // 是根节点;非根节点 0x00
+    .is_root = LORA_MESH_ROOT,      // 是根节点;非根节点 0x00
     .mesh_type = LORA_MESH_GATEWAY, // 网关；节点：0x00
     .net_id = 0x01,
     .dev_id = 0x0a,
@@ -132,7 +132,8 @@ int main(int argc, char *argv[])
 
     // 保留 /dev/rtc0 用于兼容
     rtc_fd = open("/dev/rtc0", O_RDONLY);
-
+    printf("Loading LoRa config from file...\n");
+    lora_cfg_load_persist(&my_lora_config);
     printf("Initializing LoRa module...\n");
     if (!Lora_init(&my_lora_config))
     { // 将配置参数传递给驱动

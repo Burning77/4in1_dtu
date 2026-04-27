@@ -37,7 +37,7 @@ static pthread_mutex_t g_path_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static dtu_status_t g_dtu_status = {0};
 static pthread_mutex_t g_status_mutex = PTHREAD_MUTEX_INITIALIZER;
-
+pthread_mutex_t g_lora_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
 static time_t g_bt_start_time = 0;
 extern int rs485_fd;
 extern int rs232_fd;
@@ -46,6 +46,7 @@ extern int bt_fd;
 extern int eg_fd;
 extern int watchdog_fd;
 extern loRa_Para_t my_lora_config;
+
 /**
  * @brief 从 RTC 设备读取当前时间
  * @param fd RTC 设备文件描述符
@@ -136,7 +137,7 @@ void *receive_thread(void *arg)
         FD_SET(rs485_fd, &read_fds);
         FD_SET(rs232_fd, &read_fds);
         FD_SET(bd_fd, &read_fds);
-  
+
         tv.tv_sec = 0;
         tv.tv_usec = 200000; // 200ms 超时
         max_fd = MAX(MAX(MAX(rs485_fd, rs232_fd), bd_fd), bt_fd);
@@ -401,19 +402,27 @@ void *write_file_thread(void *arg)
 // }
 void *lora_transform_thread(void *arg)
 {
-    const char *paths[] = {RS485_LOG_PATH, RS232_LOG_PATH}; // 从 RS485 和 RS232 日志发送
-    off_t offsets[] = {0, 0};                               // 初始偏移量
-    char hex_buf[LORA_MAX_HEX_LEN + 64];                    // 需定义 LORA_MAX_HEX_LEN
+    const char *paths[] = {RS485_LOG_PATH, RS232_LOG_PATH};
+    off_t offsets[] = {0, 0};
+    char hex_buf[LORA_MAX_HEX_LEN + 64];
     int hex_len, entry_count;
-    unsigned char buf[256];
-    while (!stop_flag && my_lora_config.mesh_type == LORA_MESH_NODE)
+
+    while (!stop_flag)
     {
+        loRa_Para_t cfg;
+        lora_cfg_get(&cfg);
+
+        if (cfg.mesh_type != LORA_MESH_NODE)
+        {
+            sleep(1);
+            continue;
+        }
+
         if (pack_data_from_files(paths, offsets, 2, LORA_MAX_HEX_LEN,
                                  hex_buf, &hex_len, &entry_count) == 0)
         {
             if (entry_count > 0)
             {
-                // 构造 LoRa 负载（可根据实际协议调整）
                 uint8_t payload[256];
                 int payload_len = 0;
                 for (int i = 0; i < hex_len && payload_len < sizeof(payload); i += 2)
@@ -422,25 +431,19 @@ void *lora_transform_thread(void *arg)
                     sscanf(hex_buf + i, "%2x", &byte);
                     payload[payload_len++] = (uint8_t)byte;
                 }
-                Lora_send_packet(my_lora_config.net_id, my_lora_config.dev_id, payload, payload_len);
-                printf("[SEND LORA] Sent %d bytes from RS485 log.\n", payload_len);
+
+                Lora_send_packet(cfg.net_id, cfg.dev_id, payload, payload_len);
+                printf("[SEND LORA] net=0x%02X dev=0x%02X sent %d bytes\n",
+                       cfg.net_id, cfg.dev_id, payload_len);
+
                 save_offsets(OFFSET_FILE_LORA, offsets, 2);
             }
-            else
-            {
-                printf("[INFO] No valid data in RS485 log for LoRa, skipping transmission.\n");
-            }
         }
-        else
-        {
-            printf("[ERROR] pack_data_from_files failed for LoRa\n");
-        }
-        // 等待30秒
+
         for (int i = 0; i < 30 && !stop_flag; i++)
-        {
             sleep(1);
-        }
     }
+
     save_offsets(OFFSET_FILE_LORA, offsets, 2);
     return NULL;
 }
@@ -462,7 +465,6 @@ void *lora_receive_thread(void *arg)
     }
 
     RxInit();
-    printf("[LORA RX] thread started, mesh_type=0x%02X\n", lora_para->mesh_type);
 
     while (!stop_flag)
     {
@@ -471,33 +473,30 @@ void *lora_receive_thread(void *arg)
 
         if (ret == 1)
         {
-            if (lora_para->mesh_type == LORA_MESH_GATEWAY)
+            loRa_Para_t cfg;
+            lora_cfg_get(&cfg);
+
+            if (cfg.mesh_type == LORA_MESH_GATEWAY)
             {
                 if (push_lora_to_fifo(&ctx, rx_buf, rx_len) == 0)
                 {
-                    printf("[LORA RX][GW] queued %u bytes to LORA log pipeline\n", rx_len);
-                }
-                else
-                {
-                    printf("[LORA RX][GW] queue failed, drop %u bytes\n", rx_len);
+                    printf("[LORA RX][GW] queued %u bytes\n", rx_len);
                 }
             }
-            else if (lora_para->mesh_type == LORA_MESH_NODE)
+            else if (cfg.mesh_type == LORA_MESH_NODE)
             {
-                if (stop_flag)
-                    break;
+                if (cfg.is_root == LORA_MESH_ROOT)
+                {
+                    printf("[LORA RX][NODE][ROOT] recv %u bytes, no relay\n", rx_len);
+                    continue;
+                }
+
                 printf("[LORA RX][NODE] relay %u bytes via LoRa\n", rx_len);
                 Lora_send(rx_buf, rx_len);
-            }
-            else
-            {
-                printf("[LORA RX] unknown mesh_type=0x%02X, drop %u bytes\n",
-                       lora_para->mesh_type, rx_len);
             }
         }
         else if (ret < 0)
         {
-            printf("[LORA RX] receive error=%d, reinit rx\n", ret);
             RxInit();
             usleep(100 * 1000);
         }

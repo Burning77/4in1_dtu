@@ -15,6 +15,8 @@
 #define RS232_LOG_PATH "/home/cat/rs232_data.log"
 #define BD_LOG_PATH "/home/cat/bd_data.log"
 #define LORA_LOG_PATH "/home/cat/lora_data.log"
+#define LORA_CFG_PATH "/home/cat/lora_cfg.ini"
+#define LORA_CFG_TMP_PATH "/home/cat/lora_cfg.ini.tmp"
 #define RS485_DATA 0
 #define RS232_DATA 1
 #define BD_DATA 2

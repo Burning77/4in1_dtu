@@ -63,4 +63,8 @@ void Lora_receive(uint8_t *payload, uint8_t size);
 void Lora_send_packet(uint8_t netid, uint8_t devid,
 					  uint8_t *payload, uint8_t size);
 int Lora_recv_packet(uint8_t *payload, uint8_t *out_len);
+void lora_cfg_get(loRa_Para_t *out);
+void lora_cfg_set(uint8_t field, uint8_t value);
+int lora_cfg_save_persist(void);
+int lora_cfg_load_persist(loRa_Para_t *cfg);
 #endif // LLCC68_PORT_H

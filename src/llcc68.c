@@ -3,10 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <gpiod.h>
 #include <pthread.h>
+#include "../inc/universal.h"
+
 #define FREQ_STEP 0.953674
 #define MAX_FRAME_SIZE 256
 // 全局句柄
@@ -23,6 +27,142 @@ static int last_len = 0;
 static uint8_t tx_buf[260];
 static uint8_t rx_buf[260];
 static pthread_mutex_t g_lora_lock = PTHREAD_MUTEX_INITIALIZER;
+extern pthread_mutex_t g_lora_cfg_mutex;
+extern loRa_Para_t my_lora_config;
+void lora_cfg_get(loRa_Para_t *out)
+{
+	if (out == NULL)
+		return;
+
+	pthread_mutex_lock(&g_lora_cfg_mutex);
+	*out = my_lora_config;
+	pthread_mutex_unlock(&g_lora_cfg_mutex);
+}
+
+void lora_cfg_set(uint8_t field, uint8_t value)
+{
+	pthread_mutex_lock(&g_lora_cfg_mutex);
+
+	switch (field)
+	{
+	case 0: // is_root
+		my_lora_config.is_root = value;
+		break;
+	case 1: // mesh_type
+		my_lora_config.mesh_type = value;
+		break;
+	case 2: // net_id
+		my_lora_config.net_id = value;
+		break;
+	case 3: // dev_id
+		my_lora_config.dev_id = value;
+		break;
+	default:
+		break;
+	}
+
+	pthread_mutex_unlock(&g_lora_cfg_mutex);
+}
+int lora_cfg_save_persist(void)
+{
+	loRa_Para_t cfg;
+	int fd, dirfd;
+	char buf[128];
+	int len;
+
+	lora_cfg_get(&cfg);
+
+	fd = open(LORA_CFG_TMP_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0)
+	{
+		perror("open LORA_CFG_TMP_PATH");
+		return -1;
+	}
+
+	len = snprintf(buf, sizeof(buf),
+				   "is_root=0x%02X\n"
+				   "mesh_type=0x%02X\n"
+				   "net_id=0x%02X\n"
+				   "dev_id=0x%02X\n",
+				   cfg.is_root, cfg.mesh_type, cfg.net_id, cfg.dev_id);
+
+	if (write(fd, buf, len) != len)
+	{
+		perror("write lora cfg");
+		close(fd);
+		return -1;
+	}
+
+	if (fsync(fd) != 0)
+	{
+		perror("fsync lora cfg");
+		close(fd);
+		return -1;
+	}
+
+	close(fd);
+
+	if (rename(LORA_CFG_TMP_PATH, LORA_CFG_PATH) != 0)
+	{
+		perror("rename lora cfg");
+		return -1;
+	}
+
+	dirfd = open("/home/cat", O_RDONLY | O_DIRECTORY);
+	if (dirfd >= 0)
+	{
+		fsync(dirfd);
+		close(dirfd);
+	}
+
+	printf("[LORA CFG] saved: root=0x%02X mesh=0x%02X net=0x%02X dev=0x%02X\n",
+		   cfg.is_root, cfg.mesh_type, cfg.net_id, cfg.dev_id);
+	return 0;
+}
+int lora_cfg_load_persist(loRa_Para_t *cfg)
+{
+	FILE *fp;
+	char line[64];
+	unsigned int val;
+
+	if (cfg == NULL)
+		return -1;
+
+	fp = fopen(LORA_CFG_PATH, "r");
+	if (fp == NULL)
+	{
+		printf("[LORA CFG] no cfg file, using default config\n");
+		return 0;
+	}
+
+	while (fgets(line, sizeof(line), fp))
+	{
+		if (sscanf(line, "is_root=0x%x", &val) == 1)
+		{
+			if (val == LORA_MESH_ROOT || val == LORA_MESH_NOTROOT)
+				cfg->is_root = (uint8_t)val;
+		}
+		else if (sscanf(line, "mesh_type=0x%x", &val) == 1)
+		{
+			if (val == LORA_MESH_GATEWAY || val == LORA_MESH_NODE)
+				cfg->mesh_type = (uint8_t)val;
+		}
+		else if (sscanf(line, "net_id=0x%x", &val) == 1)
+		{
+			cfg->net_id = (uint8_t)val;
+		}
+		else if (sscanf(line, "dev_id=0x%x", &val) == 1)
+		{
+			cfg->dev_id = (uint8_t)val;
+		}
+	}
+
+	fclose(fp);
+
+	printf("[LORA CFG] loaded: root=0x%02X mesh=0x%02X net=0x%02X dev=0x%02X\n",
+		   cfg->is_root, cfg->mesh_type, cfg->net_id, cfg->dev_id);
+	return 0;
+}
 int hw_init(void)
 {
 	// 1. 初始化 SPI
@@ -431,25 +571,25 @@ void GetRxBufferStatus(uint8_t *payload_len, uint8_t *buf_pointer)
 }
 void ReadBuffer(uint8_t offset, uint8_t *data, uint8_t length)
 {
-    if (data == NULL || length < 1)
-        return;
+	if (data == NULL || length < 1)
+		return;
 
-    if ((3 + length) > sizeof(tx_buf) || (3 + length) > sizeof(rx_buf))
-        return;
+	if ((3 + length) > sizeof(tx_buf) || (3 + length) > sizeof(rx_buf))
+		return;
 
-    CheckBusy();
+	CheckBusy();
 
-    uint32_t total_len = 3 + length;
+	uint32_t total_len = 3 + length;
 
-    tx_buf[0] = 0x1E;
-    tx_buf[1] = offset;
-    tx_buf[2] = 0xFF;
-    memset(&tx_buf[3], 0xFF, length);
-    memset(rx_buf, 0, total_len);
+	tx_buf[0] = 0x1E;
+	tx_buf[1] = offset;
+	tx_buf[2] = 0xFF;
+	memset(&tx_buf[3], 0xFF, length);
+	memset(rx_buf, 0, total_len);
 
-    spi_transfer(tx_buf, rx_buf, total_len);
+	spi_transfer(tx_buf, rx_buf, total_len);
 
-    memcpy(data, &rx_buf[3], length);
+	memcpy(data, &rx_buf[3], length);
 }
 void ClearIrqStatus(uint16_t irq)
 {

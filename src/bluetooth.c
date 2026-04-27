@@ -15,6 +15,8 @@
 #include "../inc/usart.h"
 #include <sys/select.h>
 #include <signal.h>
+#include "../inc/llcc68.h"
+#include "../inc/universal.h"
 
 // ============== 外部变量 ==============
 extern int bt_fd;
@@ -31,7 +33,19 @@ static pthread_mutex_t g_status_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // 启动时间
 static time_t g_start_time = 0;
+static int bt_send_lora_cfg(void)
+{
+    loRa_Para_t cfg;
+    char msg[128];
 
+    lora_cfg_get(&cfg);
+
+    snprintf(msg, sizeof(msg),
+             "LL_LORA_ROOT_0x%02X,MESH_0x%02X,NET_0x%02X,DEV_0x%02X\r\n",
+             cfg.is_root, cfg.mesh_type, cfg.net_id, cfg.dev_id);
+
+    return bt_send_text(msg);
+}
 // ============== 内部函数 ==============
 
 /**
@@ -75,8 +89,8 @@ int bt_init(void)
     // 先不要恢复出厂，避免把透传/波特率/角色改乱
     // char *default_cmd = "AT+DEFAULT=1\r\n";
 
-    char *sleep_cmd = "AT+SLEEPEN=0\r\n";   // 如果模块支持，用这个关闭睡眠
-    char *uvar_cmd  = "AT+TS=1\r\n";        // 透传模式
+    char *sleep_cmd = "AT+SLEEPEN=0\r\n"; // 如果模块支持，用这个关闭睡眠
+    char *uvar_cmd = "AT+TS=1\r\n";       // 透传模式
 
     data_send((unsigned char *)sleep_cmd, strlen(sleep_cmd), BT_DEV);
     usleep(200 * 1000);
@@ -350,6 +364,8 @@ void bt_update_status(uint8_t eg_connected, uint8_t eg_signal,
 }
 void bt_handle_simple_command(const char *cmd)
 {
+    unsigned int val;
+
     if (cmd == NULL || cmd[0] == '\0')
         return;
 
@@ -380,9 +396,60 @@ void bt_handle_simple_command(const char *cmd)
         bt_set_send_path(SEND_PATH_BD_FIRST);
         bt_send_text("LL_ACK_04\r\n");
     }
+    // 获取4g连接状态
     else if (strcmp(cmd, "LL_0a") == 0 || strcmp(cmd, "LL_0A") == 0)
     {
         bt_send_4g_status_simple();
+    }
+    else if (strcmp(cmd, "LL_LORA_GET") == 0)
+    {
+        bt_send_lora_cfg();
+    }
+    else if (sscanf(cmd, "LL_ROOT_%x", &val) == 1)
+    {
+        if (val == LORA_MESH_ROOT || val == LORA_MESH_NOTROOT)
+        {
+            lora_cfg_set(0, (uint8_t)val);
+            if (lora_cfg_save_persist() == 0)
+                bt_send_text("LL_ACK_ROOT\r\n");
+            else
+                bt_send_text("LL_ACK_SAVE_ERR\r\n");
+        }
+        else
+        {
+            bt_send_text("LL_ACK_ERR\r\n");
+        }
+    }
+    else if (sscanf(cmd, "LL_MESH_%x", &val) == 1)
+    {
+        if (val == LORA_MESH_GATEWAY || val == LORA_MESH_NODE)
+        {
+            lora_cfg_set(1, (uint8_t)val);
+            if (lora_cfg_save_persist() == 0)
+                bt_send_text("LL_ACK_MESH\r\n");
+            else
+                bt_send_text("LL_ACK_SAVE_ERR\r\n");
+        }
+        else
+        {
+            bt_send_text("LL_ACK_ERR\r\n");
+        }
+    }
+    else if (sscanf(cmd, "LL_NET_%x", &val) == 1)
+    {
+        lora_cfg_set(2, (uint8_t)val);
+        if (lora_cfg_save_persist() == 0)
+            bt_send_text("LL_ACK_NET\r\n");
+        else
+            bt_send_text("LL_ACK_SAVE_ERR\r\n");
+    }
+    else if (sscanf(cmd, "LL_DEV_%x", &val) == 1)
+    {
+        lora_cfg_set(3, (uint8_t)val);
+        if (lora_cfg_save_persist() == 0)
+            bt_send_text("LL_ACK_DEV\r\n");
+        else
+            bt_send_text("LL_ACK_SAVE_ERR\r\n");
     }
     else
     {
