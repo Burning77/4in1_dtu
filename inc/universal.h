@@ -36,6 +36,7 @@
 #define DEBUG
 #define LOG_MAX_SIZE (5 * 1024 * 1024)
 #define LOG_KEEP_TAIL_SIZE (1 * 1024 * 1024)
+#define SEND_PATH_CFG_PATH "/home/cat/send_path.cfg"
 typedef struct
 {
     int type;                  // RS485_DATA 或 RS232_DATA

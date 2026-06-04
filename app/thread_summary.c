@@ -1174,8 +1174,7 @@ void *bt_comm_thread(void *arg)
 
     bt_init();
     g_bt_start_time = time(NULL);
-    bt_set_send_path(SEND_PATH_AUTO);
-
+    bt_load_send_path();
     while (!stop_flag)
     {
         time_t now = time(NULL);

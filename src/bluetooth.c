@@ -170,6 +170,52 @@ int bt_is_connected(void)
     int value = gpiod_line_get_value(line_bt_status);
     return (value == 1) ? 1 : 0;
 }
+int bt_save_send_path(send_path_t path)
+{
+    FILE *fp = fopen(SEND_PATH_CFG_PATH, "w");
+    if (!fp)
+    {
+        perror("open send_path cfg");
+        return -1;
+    }
+
+    fprintf(fp, "%d\n", (int)path);
+    fflush(fp);
+    fsync(fileno(fp));
+    fclose(fp);
+
+    printf("[BT] send path saved: %d\n", (int)path);
+    return 0;
+}
+
+int bt_load_send_path(void)
+{
+    FILE *fp = fopen(SEND_PATH_CFG_PATH, "r");
+    int value = SEND_PATH_AUTO;
+
+    if (!fp)
+    {
+        bt_set_send_path(SEND_PATH_AUTO);
+        return -1;
+    }
+
+    if (fscanf(fp, "%d", &value) != 1)
+    {
+        fclose(fp);
+        bt_set_send_path(SEND_PATH_AUTO);
+        return -1;
+    }
+
+    fclose(fp);
+
+    if (value < SEND_PATH_AUTO || value > SEND_PATH_BD_FIRST)
+        value = SEND_PATH_AUTO;
+
+    bt_set_send_path((send_path_t)value);
+
+    printf("[BT] send path loaded: %d\n", value);
+    return 0;
+}
 
 send_path_t bt_get_send_path(void)
 {
@@ -419,26 +465,31 @@ void bt_handle_simple_command(const char *cmd)
     if (strcmp(cmd, "BL_00") == 0)
     {
         bt_set_send_path(SEND_PATH_AUTO);
+        bt_save_send_path(SEND_PATH_AUTO);
         bt_send_text("BL_ACK_00\r\n");
     }
     else if (strcmp(cmd, "BL_01") == 0)
     {
         bt_set_send_path(SEND_PATH_4G_ONLY);
+        bt_save_send_path(SEND_PATH_4G_ONLY);
         bt_send_text("BL_ACK_01\r\n");
     }
     else if (strcmp(cmd, "BL_02") == 0)
     {
         bt_set_send_path(SEND_PATH_BD_ONLY);
+        bt_save_send_path(SEND_PATH_BD_ONLY);
         bt_send_text("BL_ACK_02\r\n");
     }
     else if (strcmp(cmd, "BL_03") == 0)
     {
         bt_set_send_path(SEND_PATH_4G_FIRST);
+        bt_save_send_path(SEND_PATH_4G_FIRST);
         bt_send_text("BL_ACK_03\r\n");
     }
     else if (strcmp(cmd, "BL_04") == 0)
     {
         bt_set_send_path(SEND_PATH_BD_FIRST);
+        bt_save_send_path(SEND_PATH_BD_FIRST);
         bt_send_text("BL_ACK_04\r\n");
     }
     // 获取4g连接状态
