@@ -475,11 +475,11 @@ static int debug_bt_send_lora_by_rule(const uint8_t *data, int len)
         return -2;
     }
 
-    if (cfg.is_root == LORA_MESH_ROOT)
-    {
-        printf("[DEBUG BT] LoRa skip: root node\n");
-        return -3;
-    }
+    // if (cfg.is_root == LORA_MESH_ROOT)
+    // {
+    //     printf("[DEBUG BT] LoRa skip: root node\n");
+    //     return -3;
+    // }
 
     if (len > cfg.payload_size)
     {
